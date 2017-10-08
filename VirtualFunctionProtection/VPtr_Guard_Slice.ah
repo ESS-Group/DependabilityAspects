@@ -1,0 +1,263 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __VPTR_GUARD_SLICE__
+#define __VPTR_GUARD_SLICE__
+
+#include "JPTL.h"
+
+#ifndef likely
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+//#define likely(x)       (x)
+//#define unlikely(x)     (x)
+#endif /* likely */
+
+// configuration switch: detection-only vs. recovery (commented out)
+//#define DETECTION_ONLY
+
+namespace VptrProtection {
+
+
+// static check, whether <T> has an attribute 'vptr_protection_t' (SFINAE)
+template<typename T> int ttest(...); // overload resolution matches always
+template<typename T> char ttest(typename T::vptr_protection_t const volatile *); // preferred by overload resolution
+// BEWARE: fragile to refactoring of "vptr_protection_t" in VPtr_Guard_Slice
+template<typename T> struct __hasRedundantVptrs {
+  enum { RET=((sizeof(ttest<T>(0))==1)?1:0) };
+};
+
+// CONDITIONAL FUNCTIONS
+template<typename T, int hasRedundantVptrs=__hasRedundantVptrs<T>::RET>
+struct __ConditionalCall { // only used if <T> __hasChecksumFunctions (sliced)
+  __attribute__((always_inline)) static inline void __check(T *c) { T::vptr_protection_t::__check(c); }
+  __attribute__((always_inline)) static inline void __init(T *c) { T::vptr_protection_t::__init(c); }
+};
+template<typename T>
+struct __ConditionalCall<T,0> { // used if <T> has no ChecksumFunctions
+  template<typename U>
+  __attribute__((always_inline)) static inline void __check(U*) {}
+  template<typename U>
+  __attribute__((always_inline)) static inline void __init(U*) {}
+};
+
+// XOR-encoded-storage of a pointer
+template<unsigned long HASHCODE>
+union EncodedPointer {
+private:
+  unsigned long encoded;
+  const void* pointer;
+
+  __attribute__((always_inline)) inline void encode() {
+    encoded ^= HASHCODE;
+  }
+
+  __attribute__((always_inline)) inline void set(const void* ptr) {
+    pointer = ptr;
+    encode();
+  }
+
+public:
+  // constructors
+  __attribute__((always_inline)) inline EncodedPointer() {}
+  __attribute__((always_inline)) inline EncodedPointer(const void* ptr) : encoded(0) { set(ptr); }
+
+  // conversion operators
+  __attribute__((always_inline)) inline operator const void*() {
+    return EncodedPointer(pointer).pointer; // decoded
+  }
+  __attribute__((always_inline)) inline operator const void*() volatile {
+    return EncodedPointer(pointer).pointer; // decoded
+  }
+  __attribute__((always_inline)) inline operator unsigned long() {
+    return EncodedPointer(pointer).encoded; // decoded
+  }
+
+  // assignment operators
+  __attribute__((always_inline)) inline void operator=(const void* ptr) { set(ptr); }
+  __attribute__((always_inline)) inline void operator=(const EncodedPointer& ep) volatile {
+    this->pointer = ep.pointer;
+  }
+
+  // comparison operators
+  __attribute__((always_inline)) inline bool operator==(const void* ptr) { return (const void*)(*this) == ptr; }
+  __attribute__((always_inline)) inline bool operator==(const EncodedPointer& ep) { return pointer == ep.pointer; }
+};
+
+// data structure containing the two redundant vptrs
+template<typename T, int HASHCODE, bool HAS_VPTR>
+class RedundantVptrs {
+  private:
+  EncodedPointer<HASHCODE> redundant_vptr1;
+#ifndef DETECTION_ONLY
+  EncodedPointer<~HASHCODE> redundant_vptr2;
+#endif
+  
+  // abstraction for obtaining the actual vptr (gcc's _vptr intrinsic works for classes with less than 6 data members, only)
+  __attribute__((always_inline)) static inline const void* const get_vptr(T *obj) {
+    return *((const void**)obj);
+  }
+
+  // abstraction for overwriting an object's vptr
+  __attribute__((always_inline)) static inline void set_vptr(T* obj, const void * const vptr) {
+    *((const void *volatile *)obj) = vptr;
+  }
+  
+#ifndef DETECTION_ONLY
+  // simplified voting (cannot repair redundant_vptr2)
+  static void repair(T *obj) {
+    if(obj->__redundant_vptrs.redundant_vptr2 == get_vptr(obj)) {
+      // redundant_vptr1 is faulty -> fixing it
+      obj->__redundant_vptrs.redundant_vptr1 = get_vptr(obj);
+    }
+    else if(obj->__redundant_vptrs.redundant_vptr1 == obj->__redundant_vptrs.redundant_vptr2) {
+      // that's vptr is faulty -> fixing it
+      set_vptr(obj, obj->__redundant_vptrs.redundant_vptr1);
+    }
+    else {
+      // all three vptrs are different -> won't fix
+      // NOTE: an object with a broken vtable pointer cannot be deleted safely,
+      //       because the virtual dtor cannot be resolved!
+      obj->__vptr_error();
+    }
+  }
+#endif
+
+public:
+  // fast-path checking: only compare to redundant_vptr1, and proceed directly when ok
+  __attribute__((always_inline)) static inline void __check(T *obj) {
+    if(likely(obj->__redundant_vptrs.redundant_vptr1 == get_vptr(obj))) {
+      return;
+    }
+    else {
+#ifndef DETECTION_ONLY
+      repair(obj);
+#else
+      obj->__vptr_error();
+#endif
+    }
+  }
+
+  __attribute__((always_inline)) static inline void __init(T *obj) {
+    obj->__redundant_vptrs.redundant_vptr1 = get_vptr(obj);
+#ifndef DETECTION_ONLY
+    obj->__redundant_vptrs.redundant_vptr2 = get_vptr(obj);
+#endif
+  }
+
+  // no-op functions, used if called with wrong object type
+  template<typename U>
+  __attribute__((always_inline)) static inline void __check(U*) {}
+  template<typename U>
+  __attribute__((always_inline)) static inline void __init(U*) {}
+
+  inline RedundantVptrs() {}
+
+  // empty assign operator: as the default assign operator of a C++ class does not
+  // copy (assign) the internal vptr, we must not copy the redundant vptrs as well
+  __attribute__((always_inline)) inline RedundantVptrs& operator=(const RedundantVptrs& rv) { return *this; }
+
+  // similarly, do not copy on copy construction, as vptrs are not copied either
+  inline RedundantVptrs(const RedundantVptrs&) {}
+};
+
+// null data structure: template specialization for classes without own vptr
+template<typename T, int HASHCODE>
+class RedundantVptrs<T, HASHCODE, false> {
+  public: // dummy functions
+  __attribute__((always_inline)) static inline void __init(T *obj) {}
+  __attribute__((always_inline)) static inline void __check(T *obj) {}
+};
+
+
+// action type for JPTL::(Base)FunctionIterator
+template<typename FunctionInfo, typename LAST>
+struct VirtualFunctionCount {
+  struct EXEC {
+    enum { COUNT = LAST::COUNT + ((FunctionInfo::spec & AC::SPEC_VIRTUAL) ? 1 : 0) };
+  };
+};
+template<typename FunctionInfo>
+struct VirtualFunctionCount<FunctionInfo, void> {
+  struct EXEC { enum { COUNT = 0 }; };
+};
+
+// action type for runtime initialization of the redundant vptrs
+template<typename TypeInfo, typename>
+struct InitVptr {
+  __attribute__((always_inline)) static inline void exec(const typename TypeInfo::That* obj) {
+    __ConditionalCall<typename TypeInfo::That>::__init(const_cast<typename TypeInfo::That*>(obj));
+  }
+};
+
+// action type for runtime checking of the redundant vptrs
+template<typename TypeInfo, typename>
+struct CheckVptr {
+  __attribute__((always_inline)) static inline void exec(const typename TypeInfo::That* obj) {
+    __ConditionalCall<typename TypeInfo::That>::__check(const_cast<typename TypeInfo::That*>(obj));
+  }
+};
+
+} // namespace VptrProtection
+
+
+// the slice class that is finally introduced
+slice class VPtr_Guard_Slice {
+  private:
+  // make the runtime action type to friends, in order to declare __redundant_vptrs private
+  template <typename, typename> friend class VptrProtection::InitVptr;
+  template <typename, typename> friend class VptrProtection::CheckVptr;
+  template <typename, int> friend class VptrProtection::__ConditionalCall;
+  template <typename, int, bool> friend class VptrProtection::RedundantVptrs;
+
+  // calculate at compile-time, whether the target class "JoinPoint::That" has an own vptr
+  enum { VIRT_FUNCTIONS = JPTL::FunctionIterator<JoinPoint, VptrProtection::VirtualFunctionCount>::EXEC::COUNT +
+                          JPTL::DestructorIterator<JoinPoint, VptrProtection::VirtualFunctionCount>::EXEC::COUNT,
+         BASE_VIRT_FUNCTIONS = JPTL::BaseFunctionIterator<JoinPoint, VptrProtection::VirtualFunctionCount>::EXEC::COUNT +
+                               JPTL::BaseDestructorIterator<JoinPoint, VptrProtection::VirtualFunctionCount>::EXEC::COUNT,
+         HAS_VPTR = (VIRT_FUNCTIONS != 0) ? ((unsigned)BASE_VIRT_FUNCTIONS == (unsigned)VIRT_FUNCTIONS) : false };
+
+  // generic vptr-protection
+  public:
+  typedef VptrProtection::RedundantVptrs<JoinPoint::That, JoinPoint::HASHCODE, HAS_VPTR> vptr_protection_t;
+  // The typedef is needed for two reasons:
+  //   1) Workaround for AspectC++ Introspection Bug (FIXME)
+  //   2) For SFINAE, to test whether a class has vptr-protection enabled.
+  private:
+  vptr_protection_t __redundant_vptrs;
+
+
+  public:
+  __attribute__((always_inline)) inline void __vptr_error() {} // explicit join point
+/*
+  //FIXME TODO XXX: code size optimization: introduce these wrappers in every derived class and call them in the advice code (instead of JPTL).
+  public:
+  // access functions for advice code
+  inline void __init_vptr() {
+    JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::InitVptr>::exec(this);
+  }
+
+  inline bool __check_vptr() {
+    bool result = true;
+    JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(this, &result);
+    return result;
+  }
+*/
+};
+
+#endif

@@ -1,0 +1,107 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __LOCKER_SLICE__
+#define __LOCKER_SLICE__
+
+#include "Locker.h"
+#include "ObjectSize.h"
+#include "JPTL.h"
+
+namespace CoolChecksum {
+
+
+template<typename MemberInfo, typename LAST>
+struct LockerCount {
+  struct EXEC {
+    enum { LOCKER = LAST::LOCKER + TypeTest<ChksumLocker<true>, typename MemberInfo::Type>::EQUAL };
+  };
+};
+template<typename MemberInfo>
+struct LockerCount<MemberInfo, void> {
+  // initial EXEC
+  struct EXEC {
+    enum { LOCKER = 0 };
+  };
+};
+
+}
+
+
+slice class __LockerSlice {
+public:
+  // BASE_CLASS_LOCKER equals "0" means that we need to instantiate a new locker for this class,
+  //                   otherwise, the locker is an empty, not-usable dummy object
+  enum { BASE_CLASS_LOCKER = JPTL::BaseMemberIterator<JoinPoint, CoolChecksum::LockerCount>::EXEC::LOCKER };
+private:
+  typedef CoolChecksum::ChksumLocker<BASE_CLASS_LOCKER == 0> __locker_type; //ac++ bug: <typeinfo>:18: error: wrong number of template arguments (0, should be 1)
+  __locker_type __locker; // may be empty, if a base class has a locker, too
+
+public:
+  typedef char __hasLocker; //for SFINAE
+
+  // functions to perform base class iteration
+  inline void __iterate_lock() const {
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::Lock>::exec(const_cast<JoinPoint::That*>(this));
+  }
+
+  inline void __iterate_unlock() const {
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::Unlock>::exec(const_cast<JoinPoint::That*>(this));
+  }
+
+  inline bool __iterate_is_locked() const {
+    bool result;
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::IsLocked>::exec(const_cast<JoinPoint::That*>(this), &result);
+    return result;
+  }
+
+  inline bool __iterate_is_unlocked() const {
+    bool result;
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::IsUnLocked>::exec(const_cast<JoinPoint::That*>(this), &result);
+    return result;
+  }
+};
+
+
+slice class __LockerSliceStandAlone {
+private:
+  // CHECKSUM_SIZE == 0 means we don't need any locker (valid for StandAloneClasses)
+  typedef CoolChecksum::ChksumLocker<JoinPoint::That::CHECKSUM_SIZE != 0> __locker_type; //ac++ bug: <typeinfo>:18: error: wrong number of template arguments
+  __locker_type __locker; // may be empty, if a the checksum is empty as well
+
+public:
+  typedef char __hasLocker; //for SFINAE
+
+  inline void __iterate_lock() const {
+    __locker.__lock();
+  }
+
+  inline void __iterate_unlock() const {
+    __locker.__unlock();
+  }
+
+  inline bool __iterate_is_locked() const {
+    return __locker.__is_locked();
+  }
+
+  inline bool __iterate_is_unlocked() const {
+    return __locker.__is_unlocked();
+  }
+};
+
+#endif /* __LOCKER_SLICE__ */

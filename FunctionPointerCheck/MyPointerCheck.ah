@@ -1,0 +1,22 @@
+#ifndef MY_POINTER_CHECK_AH_
+#define MY_POINTER_CHECK_AH_
+
+#include "FunctionPointerCheck.ah"
+
+#include <functional> // for exception: std::bad_function_call
+extern "C" void __executable_start(), _etext(); // linker symbols
+
+aspect MyPointerCheck : public FunctionPointerCheck {
+  // capture the dereference operator of any function pointer
+  pointcut virtual where() = builtin("% operator *( % (*)(...) )");
+
+  // use linker symbols as limits
+  advice lower_limit() : around() { *tjp->result() = __executable_start; }
+  advice upper_limit() : around() { *tjp->result() = _etext; }
+
+  // error handling
+  advice on_error() : around() { throw std::bad_function_call(); }
+};
+
+#endif /* MY_POINTER_CHECK_AH_ */
+

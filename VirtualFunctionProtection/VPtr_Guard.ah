@@ -1,0 +1,66 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __VPTR_GUARD__
+#define __VPTR_GUARD__
+
+#include "VPtr_Guard_Slice.ah"
+#include <stdio.h>
+
+aspect VirtualPointerGuard {
+
+  // user-defined class names
+  pointcut criticalClasses() = ("A" || "B") && ! "VirtualPointerGuard";
+
+  pointcut on_error() = execution("void ...::__vptr_error()") && within(criticalClasses());
+
+  advice on_error() : before() {
+    printf("error: vptr corrupt\n");
+  }
+  
+  // internal pointcuts
+  pointcut modifiedClasses() = derived(criticalClasses());
+  pointcut virtualFunctions() = "virtual % ...::%(...)";
+
+  // internal join points from GOP that should not be advised
+  pointcut internalChecker() = "virtual % ...::__leave()" || "virtual % ...::__from_non_const_to_const()";
+
+  // order (this aspect should not be covered by any checksumming code)
+  advice modifiedClasses() : order("ChecksumIntroducer", "VirtualPointerGuard");
+
+  // generic introduction
+  advice criticalClasses() : slice VPtr_Guard_Slice;
+
+  // generate introspection code
+  advice modifiedClasses() && !criticalClasses() : slice class { typedef JoinPoint::That __dummy_type; };
+  
+  advice construction(modifiedClasses()) || destruction(modifiedClasses()) : before() { // 'before' allows vcalls inside of ctors/dtors
+    // init redundant vptr: each derived class overwrites the vptr set by its base class
+    // this effectively sets the vptr multiple times, until it is correct
+    JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::InitVptr>::exec(tjp->target());
+  }
+
+  advice call(modifiedClasses()) && call(virtualFunctions()) && !within(internalChecker()) : before() {
+    // check the target's vptr at each virtual function call
+    JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+  }
+
+  //FIXME: check vptr before destruction, i.e., on the call(destruction) site. at least when there is a virtual dtor
+};
+
+#endif

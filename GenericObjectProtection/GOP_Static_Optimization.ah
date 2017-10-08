@@ -1,0 +1,27 @@
+#ifndef __GOP_STATIC_OPTIMIZATION__AH_
+#define __GOP_STATIC_OPTIMIZATION__AH_
+
+/* auto-generated file: do not edit */
+
+aspect GOP_Static_Optimization {
+public: 
+pointcut shortFunctions() = "None* no::does::not::match(None*)";
+
+
+pointcut skip_enter() = call("None* no::does::not::match(None*)");
+
+
+pointcut skip_leave() = call("None* no::does::not::match(None*)");
+
+
+/*
+shortFunctions(): 
+0
+skip_enter(): 
+0
+skip_leave(): 
+0
+*/
+};
+#endif
+

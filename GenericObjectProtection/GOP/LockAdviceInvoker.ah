@@ -1,0 +1,247 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __LOCK_ADVICE_INVOKER_AH__
+#define __LOCK_ADVICE_INVOKER_AH__
+
+#include "StaticChecksumConstruction.ah"
+
+#include "LockerSlice.ah"
+#include "LockerStaticSlice.ah"
+#include "Actions.h"
+#include "JPTL.h"
+#include "MemoryBarriers.h"
+
+
+aspect LockAdviceInvoker {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual synchronizedClasses() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = criticalClasses() && !blacklist();
+  pointcut constFunctions() = "% ...::%(...) const";
+
+  // aspect ordering (after StaticChecksumInheritance):
+  advice execution("bool ...::__enter()" || "void ...::__leave()") :
+         order ("StaticChecksumInheritance",
+                "LockAdviceInvoker");
+  
+  // aspect ordering for introductions (after ChecksumIntroducer):
+  advice (synchronizedClasses() || inheritanceCriticalClasses()) :
+         order("%" && !("ChecksumIntroducer" || "LockAdviceInvoker" || "VirtualPointerGuard"),
+               "ChecksumIntroducer",
+               "LockAdviceInvoker",
+               "VirtualPointerGuard");
+  
+  // introduce the lockers
+  // ---------------------
+  // locker for non-static checksum
+  advice (synchronizedClasses() && inheritanceCriticalClasses()) : slice __LockerSlice;
+  advice (synchronizedClasses() && standAloneCriticalClasses()): slice __LockerSliceStandAlone;
+  // locker for static checksum
+  advice (synchronizedClasses() && standAloneCriticalClasses()) : slice __StaticLockerSlice;
+  // classes with inheritance relations get always a static locker for efficiency
+  advice (inheritanceCriticalClasses()) : slice __StaticLockerSlice;
+  
+
+  // optimizations for set advice: don't add locking code to unused %_set functions
+  // there around advice have higher precedence than the following ones containing locking code
+  advice execution("bool ...::__enter_set()") &&
+         within(synchronizedClasses()) :
+         around() {
+    if( (JoinPoint::That::INHERITANCE == 0) || (JoinPoint::That::CLASSES_WITH_STATIC_MEMBERS == 0) ) {
+      *tjp->result() = false; // this function should not be called anyway,
+      return;                 // see ChecksumSlice.ah and ChecksumGetSetAdviceInvoker.ah
+    }
+    tjp->proceed();
+  }
+  advice execution("void ...::__leave_set()") &&
+         within(synchronizedClasses()) :
+         around() {
+    if( (JoinPoint::That::INHERITANCE == 0) || (JoinPoint::That::CLASSES_WITH_STATIC_MEMBERS == 0) ) {
+      return; // this function should not be called anyway, see ChecksumSlice.ah and ChecksumGetSetAdviceInvoker.ah
+    }
+    tjp->proceed();
+  }
+
+  // non-const enter() --> always lock
+  advice execution(("bool ...::__enter()" || "bool ...::__enter_set()") && !constFunctions()) &&
+         within(synchronizedClasses()) :
+         around() {
+    // check whether object is alreay in use
+    if(tjp->that()->__iterate_is_unlocked()) {
+      tjp->proceed(); // verify the checksum(s)
+      if(*tjp->result() == false) { return; } // fail-stop: no further actions on uncorrectable errors
+    }
+    else {
+      *tjp->result() = true; // object already in use => no errors found
+    }
+    tjp->that()->__iterate_lock();
+    tjp->that()->__iterate_dirty();
+    //TODO: If the checksums for this class and all its base classes are empty,
+    //      this could be optimized out. The same applies to "MultiThreadingSynchronizer"
+    //      for the same joinpoint. However, this would only reduce code size, since
+    //      probably the __enter() function of a derived class would be used, where
+    //      a non-empty checksum exists.
+  }
+  
+  // const enter() --> lock if there are mutable attributes
+  advice execution("bool ...::__enter()" && constFunctions()) &&
+         within(synchronizedClasses()) :
+         around() {
+    // check whether object is alreay in use
+    if(tjp->that()->__iterate_is_unlocked()) {
+      tjp->proceed(); // verify the checksum(s)
+      if(*tjp->result() == false) { return; } // fail-stop: no further actions on uncorrectable errors
+    }
+    else {
+      *tjp->result() = true; // object already in use => no errors found
+    }
+    // lock when there are mutable attributes
+    if(JoinPoint::That::BASE_MEMBERS_MUTABLE != 0) {
+      tjp->that()->__iterate_lock();
+      tjp->that()->__iterate_dirty();
+    }
+  }
+  
+  // non-const leave() --> always unlock
+  advice execution(("void ...::__leave()" || "void ...::__leave_set()") && !constFunctions()) &&
+         within(synchronizedClasses()) :
+         around() {
+    tjp->that()->__iterate_dirty(); // indicate that we want to compute a new checksum
+    CoolChecksum::mfence(); // full hardware memory barrier (both loads and stores)
+    if(tjp->that()->__iterate_is_locked() == false) {
+      // false, if we are the last to leave this object
+      tjp->proceed(); // perform the checksum generation
+      //TODO: ensure this proceed() will be inlined, because "ChecksummingBase" uses __builtin_frame_address(0),
+      //      which must not change!
+    }
+    tjp->that()->__iterate_unlock();
+  }
+  
+  // lock, if not done before (i.e., while entering the const method we are returning from)
+  advice execution("void ...::__from_const_to_non_const()") &&
+         within(synchronizedClasses()) :
+         around() {
+    if(JoinPoint::That::BASE_MEMBERS_MUTABLE == 0) {
+      tjp->that()->__iterate_lock();
+      tjp->that()->__iterate_dirty(); // mark checksum as "dirty", as we can modify the object
+    }
+  }
+
+
+  // for get advice: check whether object is already in-use before checksum verification
+  advice execution("bool ...::__enter_get()") && // is OK, even though its not a virtual function
+         within(synchronizedClasses()) :
+         around() {
+    if( (JoinPoint::That::INHERITANCE == 0) && (JoinPoint::That::MEMBERS_MUTABLE == 0) ) {
+      *tjp->result() = false; // this function should not be called anyway,
+      return;                 // see ChecksumSlice.ah and ChecksumGetSetAdviceInvoker.ah
+    }
+    // check whether object is alreay in use
+    if(tjp->that()->__iterate_is_unlocked()) {
+      tjp->proceed(); // verify the checksum(s)
+    }
+    else {
+      *tjp->result() = true; // object already in use => no errors found
+    }
+  }
+  
+
+  // for the static checksum:
+  advice execution("bool ...::__static_check_worker()") &&
+         within(synchronizedClasses() || inheritanceCriticalClasses()) :
+         around() {
+    // check whether static members are alreay in use
+    if(JoinPoint::That::__static_is_unlocked()) {
+      tjp->proceed(); // verify the checksum
+      if(*tjp->result() == false) { return; } // fail-stop: no further actions on uncorrectable errors
+    }
+    else {
+      *tjp->result() = true; // static members already in use => no errors found
+    }
+    JoinPoint::That::__static_lock();
+    JoinPoint::That::__static_chksum.__dirty();
+  }
+  
+  advice execution("void ...::__static_generate_worker()") &&
+         within(synchronizedClasses() || inheritanceCriticalClasses()) :
+         around() {
+    JoinPoint::That::__static_chksum.__dirty(); // indicate that we want to compute a new checksum
+    if(JoinPoint::That::SYNCHRONIZED==1) {
+      if(JoinPoint::That::__static_chksum_t::SIZE != 0) {
+       CoolChecksum::mfence(); // full hardware memory barrier (both loads and stores)
+      }
+    }
+    if(JoinPoint::That::__static_is_locked() == false) {
+      tjp->proceed();
+      //TODO: ensure this proceed() will be inlined, because "ChecksummingBase" uses __builtin_frame_address(0),
+      //      which must not change!
+    }
+    JoinPoint::That::__static_unlock();
+  }
+  
+  // for object construction: explicitly lock
+  // this is necessary, since constructor bodies can call arbitrary functions,
+  // which will cause __leave() resp. unlock to be called.
+  // thus, the object MUST be locked before its construction
+  advice construction(derived(synchronizedClasses())) : before() {
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      tjp->that()->__iterate_lock();
+      //tjp->that()->__iterate_dirty(); // we don't need to mark the object 'dirty' during construction, do we?
+    }
+  };
+
+  // for the static checksum on object construction
+  advice construction(synchronizedClasses() || derived(inheritanceCriticalClasses())) : before() {
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      // The function "__static_checksum_initialized()" is called when the static checksum
+      // is to be verified during object construction. Since for static objects, the checksum
+      // may not be initialized yet, the actual check is omitted when not initialized.
+      // But after object construction, the checksum is generated, so that the locker
+      // has to be invoked explicitly, in order to execute lock/unlock equally often.
+      if(StaticChecksumConstruction::__static_checksum_initialized() == false) {
+        // initialize the static locker, then lock it
+        CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::STATIC_CHECKSUM_SIZE>::__static_init_and_lock();
+        // we may modify static members (from now on), thus, mark the static checksum 'dirty'
+        CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::STATIC_CHECKSUM_SIZE>::__static_dirty();
+      }
+    }
+  }
+
+  advice construction(derived(inheritanceCriticalClasses())) : before() {
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      // For object construction, the constructors are executed in order from base to derived.
+      // Therefore, there is no need to check the bases' checksums during object construction,
+      // because they already have been verified by the bases' constructors.
+      // But after object construction, the bases' checksum have to be generated once more,
+      // so that, in order to execute lock/unlock equally often, we have to explicitly
+      // lock *only* the *real* base-classes' lockers, but not the actual one (JoinPoint::That).
+      // TODO: get rid of AC::TypeInfo here
+      JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, CoolChecksum::StaticConstructionLock, CoolChecksum::StaticConstructionLockInit<JoinPoint::That> >::exec();
+      // Base classes are marked 'dirty' in the 'StaticConstructionLock' action type
+    }
+  }
+};
+
+
+#endif /* __LOCK_ADVICE_INVOKER_AH__ */

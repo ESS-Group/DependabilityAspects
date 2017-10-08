@@ -1,0 +1,488 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __CHECKSUM_ADVICE_INVOKER_AH__
+#define __CHECKSUM_ADVICE_INVOKER_AH__
+
+//#include "../vptr_guard/VPtr_Guard_Slice.ah"
+
+#include "ObjectSize.h"
+#include "Actions.h"
+#include "JPTL.h"
+
+
+aspect ChecksumAdviceInvoker {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual synchronizedClasses() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual skip_enter() = 0;
+  pointcut virtual skip_leave() = 0;
+  pointcut virtual internalChecker() = 0; // internal pointcuts that must not be advised
+
+  // helper pointcuts
+  pointcut modifiedClasses() = (derived(criticalClasses()) && !blacklist()) || standAloneCriticalClasses();
+  pointcut constFunctions() = "% ...::%(...) const";
+  pointcut staticFunctions() = "static % ...::%(...)";
+
+  // aspect ordering (this aspect must be always the FIRST, except for ... a lot of exceptions):
+  // (after advice needs the highest precedence, too)
+#if 0
+  //TODO XXX FIXME: order!!!
+  advice call(modifiedClasses()) : order("%Checksum%Leave",
+                                         "StaticChecksum%",
+                                         "ChecksumAdviceInvoker",
+                                         "%" && !("StaticChecksum%" || "ChecksumAdviceInvoker" || "ChecksumAdviceInvokerLeave") );
+#endif
+  // aspect ordering for the constructors ('MemLogger' outputs the checksummed memory addresses for fault-injection) 
+  advice construction(modifiedClasses()) : order("MemLogger",
+                                                 "ChecksumAdviceInvoker",
+                                                 "%" && !("MemLogger" || "ChecksumAdviceInvoker") );
+
+
+  // initialize the checksum after constructor
+  advice construction(modifiedClasses()) : after() {
+    // lock is set by "LockAdviceInvoker.ah" before object construction,
+    // so it is sane to call __leave here without preceeding __enter.
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      // calling __leave() here will 'unlock', and also update the static checksums (for classes w/ inheritance)
+      typedef JoinPoint::That ACTUAL_TYPE;
+      tjp->that()->ACTUAL_TYPE::__leave(); // no virtual function call; use fully-qualified variant
+    }
+    else {
+      // don't 'unlock', and don't update the static checksums, and don't iterate over base classes:
+      // needed for the following __generate(...) to succeed:
+      CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::__chksum_t::SIZE>::__dirty(tjp->that());
+      //FIXME: the following call should not be inlined to avoid code bloat
+      CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::__chksum_t::SIZE>::__generate(tjp->that());
+    }
+  }
+
+  // verify the checksum before destructor
+  advice destruction(modifiedClasses()) : before() {
+    if(JoinPoint::That::USER_DEFINED_DESTRUCTOR == 1) { // has user-defined destructor
+      // there is no __leave for this __enter invocation, so the checksum lock is left in 'locked' state
+      typedef JoinPoint::That ACTUAL_TYPE;
+      tjp->that()->ACTUAL_TYPE::__enter(); // no virtual function call; use fully-qualified variant
+    }
+  }
+  
+  // the following advices are defined in that order: check the calle; safe the caller
+  // --> thus, the static checksum (which has always a static locker), is checked first and then (re-)generated
+  // --> that order prevents generating the static checksum and checking it again immediately (ONLY for classes with inheritance)
+
+  // before each non-const function of checksum protected classes: verify the checksum
+  advice call(modifiedClasses()) &&
+         (!call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : before() {
+    // static checks (different types or different objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__enter();
+      //hint: the __leave() (in case of an object switch) on tjp->that()
+      //is performed by the call("% ...::%(...)") advices below
+    }
+  }
+
+  // before each const function of checksum protected classes: verify the checksum
+  advice call(modifiedClasses()) &&
+         (call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : before() {
+    // hint: const functions cannot be static, hence there is no need to exclude them
+    // static checks (different types or different objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      static_cast<const JoinPoint::Target*>(tjp->target())->__enter();
+    }
+  }
+
+  // after non-const function: (re-)generate the checksum after successful unlock
+  advice call(modifiedClasses()) &&
+         (!call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : after() {
+    // static checks (different types or different objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__leave();
+    }
+  }
+
+  // after const function: (re-)generate the checksum in the case of mutable attributes
+  advice call(modifiedClasses()) &&
+         call(constFunctions()) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : after() {
+    // hint: const functions cannot be static, hence there is no need to exclude them
+    // static checks (different types or different objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //(re-)generate the checksum, since mutable attributes may have changed
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      static_cast<const JoinPoint::Target*>(tjp->target())->__leave();
+    }
+  }
+  
+  //-------------------------------------------------------------------------------------------------------------------------------
+  //<blacklist only>
+  advice call(modifiedClasses()) &&
+         within(blacklist()) &&
+         (!call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : before() {
+    // static checks (same types and same objects)
+    // The objects must be the same, since otherwise, the ordinary advices (see above)
+    // detect the object switch and thus perform the __enter() call, anyway (and hence twice).
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__enter();
+    }
+  }
+  
+  // before each const function of checksum protected classes: verify the checksum
+  advice call(modifiedClasses()) &&
+         within(blacklist()) &&
+         (call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : before() {
+    // hint: const functions cannot be static, hence there is no need to exclude them
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      static_cast<const JoinPoint::Target*>(tjp->target())->__enter();
+    }
+  }
+  
+  // after const function: (re-)generate the checksum in the case of mutable attributes
+  advice call(modifiedClasses()) &&
+         within(blacklist()) &&
+         call(constFunctions()) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : after() {
+    // hint: const functions cannot be static, hence there is no need to exclude them
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      //(re-)generate the checksum, since mutable attributes may have changed
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      static_cast<const JoinPoint::Target*>(tjp->target())->__leave();
+    }
+  }
+  
+  // after non-const function: (re-)generate the checksum after successful unlock
+  advice call(modifiedClasses()) &&
+         within(blacklist()) &&
+         (!call(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : after() {
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__leave();
+    }
+  }
+  
+
+  // calls from modifiedClasses()-to-blacklist():
+  // --> checksum inserted in a derived class of blacklist() ... wtf!
+  //XXX: the following advices are very experimental ... your search for bugs should start here:
+  //TODO: should virtual functions in blacklisted classes be catched? -> they may dispatch to non-blacklisted, derived classes
+  // within(non-const):
+  advice call(blacklist()) &&
+         within(modifiedClasses()) &&
+         (!within(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!within(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : before() {
+    // hint: upcall with object (That equals Target)
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // not within static function, no call to a static function
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      tjp->that()->__leave(); // safe the caller
+    }
+  }
+
+  // within(non-const):
+  advice call(blacklist()) &&
+         within(modifiedClasses()) &&
+         (!within(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!within(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : after() {
+    // hint: upcall with object (That equals Target)
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // not within static function, no call to a static function
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      tjp->that()->__enter(); // check the caller
+    }
+  }
+
+  // within(const):
+  advice call(blacklist()) &&
+         within(modifiedClasses()) &&
+         (within(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!within(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_leave()) &&
+         (!within(internalChecker())) : before() {
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // no call to a static function
+      // hint: const functions cannot be static, hence there is no need to exclude them
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      static_cast<const JoinPoint::That*>(tjp->that())->__leave(); // safe the caller
+    }
+  }
+  
+  // within(const):
+  advice call(blacklist()) &&
+         within(modifiedClasses()) &&
+         (within(constFunctions())) &&
+         (!call(staticFunctions())) &&
+         (!within(staticFunctions())) &&
+         (!call(internalChecker())) &&
+         (!skip_enter()) &&
+         (!within(internalChecker())) : after() {
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // no call to a static function
+      // hint: const functions cannot be static, hence there is no need to exclude them
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      static_cast<const JoinPoint::That*>(tjp->that())->__enter();
+    }
+  }
+  
+  //</blacklist only>
+  //-------------------------------------------------------------------------------------------------------------------------------
+
+
+  // "non-const -> const" transition within the same object
+  advice call(modifiedClasses()) &&
+         within(modifiedClasses()) &&
+         (!within(constFunctions())) &&
+         call(constFunctions()) &&
+         (!call(shortFunctions())) &&
+         (!call(internalChecker())) &&
+         (!within(internalChecker())) : before() {
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // transition from non-const to const within the same object
+      // only (re-)generate non-mutable attributes
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__from_non_const_to_const();
+    }
+  }
+  
+  // backwards transition only needed for multithreading support,
+  // in particular for locking: BEWARE '&& within(synchronizedClasses())'
+  advice call(modifiedClasses()) &&
+         within(modifiedClasses()) &&
+         (!within(constFunctions())) &&
+         call(constFunctions()) &&
+         (!call(shortFunctions())) &&
+         within(synchronizedClasses()) &&
+         call(synchronizedClasses()) &&
+         (!call(internalChecker())) &&
+         (!within(internalChecker())) : after() {
+    // static checks (same types and same objects)
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 1) &&
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == true) ) {
+      // transition from const to non-const within the same object
+      // just an explicit (virtual) join-point for locking
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      tjp->target()->__from_const_to_non_const();
+    }
+  }
+  
+};
+
+
+
+aspect ChecksumAdviceInvokerLeave {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual internalChecker() = 0; // internal pointcuts that must not be advised
+
+  // helper pointcuts
+  pointcut modifiedClasses() = (derived(criticalClasses()) && !blacklist()) || standAloneCriticalClasses();
+  pointcut inheritanceCriticalClasses() = derived(criticalClasses()) && !blacklist();
+  pointcut constFunctions() = "% ...::%(...) const";
+  pointcut staticFunctions() = "static % ...::%(...)";
+
+  // calls to 'outside' of this object
+  pointcut objectLeave() = call("% ...::%(...)") &&
+                           within(modifiedClasses()) &&
+                           (!within(staticFunctions())) &&
+                           (!call(shortFunctions())) &&
+                           (!call(internalChecker())) &&
+                           (!within(internalChecker()));
+
+  // calls from one class with inheritance to another one:
+  // the call target could be a (static) function of the same class (or base class),
+  // thus check _before_ generate in order to use the locker to avoid redundant checks/generates
+  // TODO: this could be further restricted to base/derived relationships!
+  advice objectLeave() &&
+         within(inheritanceCriticalClasses()) &&
+         call(inheritanceCriticalClasses()) : order("StaticChecksumInheritance",
+                                                    "ChecksumAdviceInvokerLeave",
+                                                    "%Checksum%" && !("ChecksumAdviceInvokerLeave" || "StaticChecksumInheritance") );
+
+  // calls from either classes without inheritance or to a target class without inheritance:
+  // generate _before_ check
+  advice objectLeave() && !
+         (within(inheritanceCriticalClasses()) &&
+         (call(inheritanceCriticalClasses()))) : order("%Checksum%Leave",
+                                                       "%Checksum%" && !"%Checksum%Leave");
+
+  // within(non-const):
+  advice objectLeave() &&
+         (!within(constFunctions())) &&
+         (!call(staticFunctions())) :
+         before() {
+    // static checks:      different types   ...                   or
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) { // object switch
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      tjp->that()->__leave(); // safe the caller
+    }
+  }
+  
+  // within(const):
+  advice objectLeave() &&
+         within(constFunctions()) &&
+         (!call(staticFunctions())) :
+         before() {
+    // static checks:      different types   ...                   or
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) { // object switch
+      // hint: const functions cannot be static, hence there is no need to exclude them
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      static_cast<const JoinPoint::That*>(tjp->that())->__leave(); // safe the caller
+    }
+  }
+  
+  // within(non-const):
+  advice objectLeave() &&
+         (!within(constFunctions())) &&
+         (!call(staticFunctions())) :
+         after() {
+    // static checks:      different types   ...                   or
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) { // object switch
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      tjp->that()->__enter(); // check the caller
+    }
+  }
+  
+  // within(const):
+  advice objectLeave() &&
+         within(constFunctions()) &&
+         (!call(staticFunctions())) :
+         after() {
+    // static checks:      different types   ...                   or         
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+        (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) { // object switch
+      // hint: const functions cannot be static, hence there is no need to exclude them
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+      static_cast<const JoinPoint::That*>(tjp->that())->__enter();
+    }
+  }
+  
+  // calls to static functions -> always leave this object
+  // within(non-const):
+  advice objectLeave() &&
+         (!within(constFunctions())) &&
+         call(staticFunctions()) :
+         before() {
+    //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+    tjp->that()->__leave(); // safe the caller
+  }
+  
+  // within(const):
+  advice objectLeave() &&
+         within(constFunctions()) &&
+         call(staticFunctions()) :
+         before() {
+    //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+    static_cast<const JoinPoint::That*>(tjp->that())->__leave(); // safe the caller
+  }
+  
+  // within(non-const):
+  advice objectLeave() &&
+         (!within(constFunctions())) &&
+         call(staticFunctions()) :
+         after() {
+    //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+    tjp->that()->__enter(); // check the caller
+  }
+  
+  // within(const):
+  advice objectLeave() &&
+         within(constFunctions()) &&
+         call(staticFunctions()) :
+         after() {
+    //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, VptrProtection::CheckVptr>::exec(tjp->that());
+    static_cast<const JoinPoint::That*>(tjp->that())->__enter();
+  }
+
+};
+
+#endif // __CHECKSUM_ADVICE_INVOKER_AH__

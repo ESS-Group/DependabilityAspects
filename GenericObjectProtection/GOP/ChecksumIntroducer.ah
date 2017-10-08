@@ -1,0 +1,125 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __CHECKSUM_INTRODUCER_AH__
+#define __CHECKSUM_INTRODUCER_AH__
+
+#include "GOP_GlobalConfig.h"
+#include "Actions.h"
+#include "JPTL.h"
+#include "ChecksumSlice.ah"
+#include "StaticChecksumSlice.ah"
+
+
+aspect ChecksumIntroducer {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual synchronizedClasses() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = criticalClasses() && !blacklist();
+
+  // aspect ordering (this aspect must be always the LAST due to slicing, except for LockAdviceInvoker):
+  advice inheritanceCriticalClasses() : order("%" && !("ChecksumIntroducer" || "LockAdviceInvoker" || "VirtualPointerGuard"),
+                                              "ChecksumIntroducer",
+                                              "LockAdviceInvoker",
+                                              "VirtualPointerGuard");
+  advice standAloneCriticalClasses() : order("%" && !("ChecksumIntroducer" || "LockAdviceInvoker" || "VirtualPointerGuard"),
+                                             "ChecksumIntroducer",
+                                             "LockAdviceInvoker",
+                                             "VirtualPointerGuard");
+
+  // slices:
+  advice (inheritanceCriticalClasses() || standAloneCriticalClasses()) : slice class {
+    // const type info
+    public:
+    enum { MEMBERS_MUTABLE = JPTL::MemberIterator<JoinPoint, CoolChecksum::MemberCount>::EXEC::MUTABLE,
+           BASE_MEMBERS_MUTABLE = JPTL::BaseMemberIterator<JoinPoint, CoolChecksum::MemberCount>::EXEC::MUTABLE,
+           USER_DEFINED_CONSTRUCTOR = (JoinPoint::CONSTRUCTORS == 0) ? 0 : 1,
+           USER_DEFINED_DESTRUCTOR  = (JoinPoint::DESTRUCTORS == 0) ? 0 : 1 };
+
+    // for ttest
+    typedef char __hasChecksumFunctions;
+
+    // grant access for __ConditionalCall
+    template <typename, int> friend struct CoolChecksum::__ConditionalCall;
+    template <typename, bool, unsigned, unsigned> friend class CoolChecksum::Checksumming;
+    template<typename T, bool STATIC> friend struct CoolChecksum::Get;
+  };
+
+  // generate type info also for non-protected derived classes
+  advice (derived(inheritanceCriticalClasses()) && !inheritanceCriticalClasses()) && !blacklist() : slice class {
+    // const type info
+    public:
+    enum { USER_DEFINED_CONSTRUCTOR = (JoinPoint::CONSTRUCTORS == 0) ? 0 : 1,
+           USER_DEFINED_DESTRUCTOR  = (JoinPoint::DESTRUCTORS == 0) ? 0 : 1 };
+    enum { STATIC_CHECKSUM_SIZE = 0 };
+
+    struct __chksum_t {
+      enum { SIZE = 0 };
+    };
+  };
+
+  // mark classes as (NON)-SYNCHRONIZED
+  advice (synchronizedClasses() && (inheritanceCriticalClasses() || standAloneCriticalClasses())) : slice class {
+    public:
+    enum { SYNCHRONIZED = 1 };
+  };
+  advice (!synchronizedClasses() && (inheritanceCriticalClasses() || standAloneCriticalClasses())) : slice class {
+    public:
+    enum { SYNCHRONIZED = 0 };
+  };
+
+  // mark classes with inheritance:
+  advice inheritanceCriticalClasses() : slice class {
+    public:
+    enum { INHERITANCE = 1 };
+  };
+  advice standAloneCriticalClasses() : slice class {
+    public:
+    enum { INHERITANCE = 0 };
+  };
+
+  // slices for classes with inheritance:
+  advice inheritanceCriticalClasses() : slice __InheritanceChecksumType;
+#if GOP_USE_GET_SET_ADVICE
+  advice inheritanceCriticalClasses() : slice __InheritanceChecksumTypeGetSet;
+#endif
+  
+  // slices for stand-alone-classes:
+  advice standAloneCriticalClasses() : slice __StandAloneChecksumType;
+#if GOP_USE_GET_SET_ADVICE
+  advice standAloneCriticalClasses() : slice __StandAloneChecksumTypeGetSet;
+#endif
+  
+  // for static members:
+  advice (inheritanceCriticalClasses() || standAloneCriticalClasses()) : slice __StaticChecksumType;
+  
+  // slices required only for multithreading:
+  advice (inheritanceCriticalClasses() && synchronizedClasses()) : slice __InheritanceChecksumTypeSync;
+  advice (standAloneCriticalClasses() && synchronizedClasses()) : slice __StandAloneChecksumTypeSync;
+
+  // slices required only for non-multithreading:
+  advice (inheritanceCriticalClasses() && !synchronizedClasses()) : slice __InheritanceChecksumTypeNonSync;
+
+};
+
+#endif // __CHECKSUM_INTRODUCER_AH__

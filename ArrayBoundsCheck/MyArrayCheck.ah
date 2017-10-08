@@ -1,0 +1,17 @@
+#ifndef MY_ARRAY_CHECK_AH_
+#define MY_ARRAY_CHECK_AH_
+
+#include "ArrayBoundCheck.ah"
+
+#include <stdexcept> // for exception: std::out_of_range
+
+aspect MyArrayCheck : public ArrayBoundsCheck {
+  // capture access to any variable
+  pointcut virtual where() = "% ...::%";
+
+  // error handling
+  advice on_error() : around() { throw std::out_of_range(JoinPoint::signature()); }
+};
+
+#endif /* MY_ARRAY_CHECK_AH_ */
+

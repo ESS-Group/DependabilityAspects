@@ -1,0 +1,69 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __LOCKER_STATIC_SLICE_AH__
+#define __LOCKER_STATIC_SLICE_AH__
+
+#include "Locker.h"
+
+slice class __StaticLockerSlice {
+private:
+  typedef CoolChecksum::ChksumLocker<JoinPoint::That::STATIC_CHECKSUM_SIZE != 0> __StaticLockerType; //ac++ bug #467
+  static __StaticLockerType __static_locker;
+  
+public:
+  static inline void __static_lock() {
+    if(JoinPoint::That::STATIC_CHECKSUM_SIZE != 0) { // test (again) to avoid calls to non-existing non-inline slices
+      __static_locker.__lock();
+    }
+  }
+  
+  static inline void __static_unlock() {
+    if(JoinPoint::That::STATIC_CHECKSUM_SIZE != 0) { // test (again) to avoid calls to non-existing non-inline slices
+      __static_locker.__unlock();
+    }
+  }
+
+  static inline bool __static_is_locked() {
+    if(JoinPoint::That::STATIC_CHECKSUM_SIZE != 0) { // test (again) to avoid calls to non-existing non-inline slices
+      return __static_locker.__is_locked();
+    }
+    else {
+      return true;
+    }
+  }
+
+  static inline bool __static_is_unlocked() {
+    if(JoinPoint::That::STATIC_CHECKSUM_SIZE != 0) { // test (again) to avoid calls to non-existing non-inline slices
+      return __static_locker.__is_unlocked();
+    }
+    else {
+      return false;
+    }
+  }
+
+  static inline void __static_init_and_lock() {
+    if(JoinPoint::That::STATIC_CHECKSUM_SIZE != 0) { // test (again) to avoid calls to non-existing non-inline slices
+      __static_locker.__init_and_lock();
+    }
+  }
+};
+
+slice __StaticLockerSlice::__StaticLockerType __StaticLockerSlice::__static_locker;
+
+#endif /* __LOCKER_STATIC_SLICE_AH__ */

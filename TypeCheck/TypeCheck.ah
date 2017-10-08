@@ -1,0 +1,54 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __TYPECHECK__AH__
+#define __TYPECHECK__AH__
+
+template<int HASHCODE>
+class TypeCode {
+  int code; // storage for object's HASHCODE
+public:
+  inline TypeCode() : code(HASHCODE) {} // initialize
+  inline ~TypeCode() { code = 0; } // nullify on deletion
+  inline bool invalid() const { return code != HASHCODE; }
+};
+
+aspect TypeCheck {
+protected:
+  pointcut virtual where() = 0; // must be defined by derived aspects
+  pointcut on_error() = execution("void TypeCheck::error()");
+
+private:
+  inline void error() {} // explicit join point, exposed via on_error()
+  pointcut _where() = where() && !"TypeCode<%>" && !derived("TypeCheck");
+
+  advice _where() : slice class { // generic introduction
+    TypeCode<JoinPoint::HASHCODE> type_code;
+  };
+
+  advice (get(_where()) && !get("static % ...::%") && target(!"void")) ||
+         (set(_where()) && !set("static % ...::%") && target(!"void")) ||
+         (destruction(_where())) ||
+         (call(_where()) && call("virtual % ...::%(...)"))
+  : before() {
+    if (tjp->target()->type_code.invalid()) // generic advice
+      error();
+  }
+};
+
+#endif /* __TYPECHECK__AH__ */

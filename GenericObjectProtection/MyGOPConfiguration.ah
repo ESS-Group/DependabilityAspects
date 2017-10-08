@@ -1,0 +1,85 @@
+#ifndef __MY_GOP_CONFIGURATION_AH__
+#define __MY_GOP_CONFIGURATION_AH__
+
+#include <iostream>
+#include <stdlib.h>
+
+#include "GOP/GOP_Common.ah"
+#include "GOP_Static_Optimization.ah"
+
+
+aspect MyGOPConfiguration : public GOP_Common {
+public:
+  // they get a virtual checksum method (and thus a vtable)
+  pointcut criticalClasses() = derived("Rectangle");
+  
+  // use with caution (i.e. blacklisted classes must not access inherited protected attributes)
+  pointcut blacklist() = "Guarded_%";
+  
+  // classes that have no derived classes an no 'critical' base classes
+  pointcut standAloneCriticalClasses() = "Circle";
+  
+  // multithreading
+  pointcut synchronizedClasses() = (criticalClasses() && !blacklist()) || standAloneCriticalClasses();
+
+  // entryPoint() decribes the entry function of your system, at which point (in time)
+  // all global/static objects had been constructed (i.e., after __static_initialization_and_construction)
+  pointcut entryPoint() = "% main(...)" || "% cyg_start(...)" || "% cyg_user_start(...)";
+
+  // The shortFunctions() pointcut serves for optimization purpose.
+  // Whenever a call to such function is made *inside* a member function
+  // of a protected class, the protected class instance will *not* be
+  // protected during the execution of that "shortFunction" (the one called).
+  // Example: Assume f() is member function of a protected class X
+  //   a) X::f() -> X::leave() -> printf(...) -> X::enter() -> X::f()
+  //   b) X::f() -> printf() -> X::f()
+  //
+  // Case a) shows the usual behavior.
+  // Case b) shows that the inverted enter/leave operations are omitted for
+  //         shortFunctions.
+  //
+  // A good starting point for shortFunctions are functions that do not
+  // call other functions, e.g., getters, setters, and memcpy-like:
+  // "% ...::get%(...)" || "% ...::set%(...)" || "% memcpy(...)" || ...
+  pointcut shortFunctions() = GOP_Static_Optimization::shortFunctions();
+
+  // The skip_enter() and skip_leave() pointcuts describe join points
+  // where enter/leave operations can be ommitted. For example,
+  // two subsequent calls to the same class or object can be optimized:
+  // obj.foo(); <- leave() can be skipped here
+  // obj.bar(); <- enter() can be skipped here
+  pointcut skip_enter() = GOP_Static_Optimization::skip_enter();
+  pointcut skip_leave() = GOP_Static_Optimization::skip_leave();
+
+
+  // uncorrectable-error handling:
+  advice on_error(corrected) : after(bool corrected) {
+    if(corrected == false) {
+      std::cout << "CHECK FAILED: "
+                << AC::TypeInfo<JoinPoint::That>::signature()
+                << " @ " << tjp->that() << std::endl;
+      exit(1);
+    }
+  }
+
+  advice on_error_static(corrected) : after(bool corrected) {
+    if(corrected == false) {
+      std::cout << "STATIC CHECK FAILED: "
+                << AC::TypeInfo<JoinPoint::That>::signature() << std::endl;
+      exit(1);
+    }
+  }
+
+  advice on_error_synchronized() : after() {
+    std::cout << "LOCKER CHECK FAILED" << std::endl;
+    exit(1);
+  }
+
+  // notification when a correctable error gets corrected
+  advice on_correction() : after() {
+    static unsigned errors_corrected = 0;
+    std::cout << "errors_corrected: " << ++errors_corrected << std::endl;
+  }
+};
+
+#endif /* __MY_GOP_CONFIGURATION_AH__ */

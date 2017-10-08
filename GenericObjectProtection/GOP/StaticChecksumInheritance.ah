@@ -1,0 +1,212 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __STATIC_CHECKSUM_INHERITANCE__
+#define __STATIC_CHECKSUM_INHERITANCE__
+
+aspect StaticChecksumInheritance {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual skip_enter() = 0;
+  pointcut virtual skip_leave() = 0;
+  pointcut virtual internalChecker() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = derived(criticalClasses()) && !blacklist();
+  pointcut staticFunctions() = "static % ...::%(...)";
+  pointcut constFunctions() = "% ...::%(...) const";
+  
+  // this aspect must have higher precedence than "LockAdviceInvoker" (the lock skips checks when already 'locked')
+  advice execution("bool ...::__enter()" || "void ...::__leave()") : order ("StaticChecksumInheritance",
+                                                                            "LockAdviceInvoker");
+  
+  // advise __enter() and __leave() within(inheritanceCriticalClasses()):
+  advice execution("bool ...::__enter()") && within(inheritanceCriticalClasses()) : before() {
+    JoinPoint::That::__static_iterate_check();
+  }
+  
+  advice execution("void ...::__leave()" && !constFunctions()) && within(inheritanceCriticalClasses()) : before() {
+    JoinPoint::That::__static_iterate_generate();
+  }
+
+  advice execution("void ...::__leave()" && constFunctions()) && within(inheritanceCriticalClasses()) : before() {
+    // if there are no mutable members, this function internally calls the non-const __leave()
+    if(JoinPoint::That::BASE_MEMBERS_MUTABLE == 0) {
+      // otherwise, we need to generate the static checksum on our own
+      JoinPoint::That::__static_iterate_generate();
+    }
+  }
+
+  advice execution("void ...::__from_non_const_to_const() const") && within(inheritanceCriticalClasses()) : before() {
+    // if there are no mutable members, this function internally calls the non-const __leave()
+    // however, as we stay inside the same class, we must prevent generating the static checksums
+    if(JoinPoint::That::BASE_MEMBERS_MUTABLE == 0) {
+      // just increment the thread counter
+      JPTL::BaseIterator<AC::TypeInfo<JoinPoint::That>, CoolChecksum::StaticLock>::exec();
+      // the counter will immediately be decremented again by the internally invoked __leave()
+    }
+  }
+
+
+  //---------------------------------------------------------------------------->
+  pointcut staticEnter() = call(inheritanceCriticalClasses()) &&
+                           call(staticFunctions()) &&
+                           (!call(internalChecker())) &&
+                           (!within(internalChecker()));
+
+  // calls from one class with inheritance to another one:
+  // the call target could be a (static) function of the same class (or base class),
+  // thus check _before_ generate in order to use the locker to avoid redundant checks/generates
+  // TODO: this could be further restricted to base/derived relationships!
+  advice staticEnter() && within(inheritanceCriticalClasses()) : order("StaticChecksumInheritance",
+                                                                       "%Checksum%" && !"StaticChecksumInheritance");
+
+  // calls coming from classes without inheritance (hence, that/target types are different):
+  // generate _before_ check
+  advice staticEnter() && !within(inheritanceCriticalClasses()) : order("%Checksum%" && !"StaticChecksumInheritance",
+                                                                        "StaticChecksumInheritance");
+
+  // before static function call: verify the static checksum (order: before "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!call(shortFunctions())) &&
+         (!skip_enter()) &&
+         (!within(staticFunctions())) :
+         before() {
+    // non-static-to-static transition
+    JoinPoint::Target::__static_iterate_check();
+  }
+  
+  // after static function call: (re-)generate the static checksum (order: after "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!call(shortFunctions())) &&
+         (!skip_leave()) &&
+         (!within(staticFunctions())) :
+         after() {
+    // non-static-to-static transition 
+    JoinPoint::Target::__static_iterate_generate();
+  }
+  
+  // before static function call: verify the static checksum (order: before "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!call(shortFunctions())) &&
+         (!skip_enter()) &&
+         within(staticFunctions()) :
+         before() {
+    // static checks (different types only) [static->static transition]
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::Target::__static_iterate_check();
+    }
+  }
+  
+  // after static function call: (re-)generate the static checksum (order: after "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!call(shortFunctions())) &&
+         (!skip_leave()) &&
+         within(staticFunctions()) :
+         after() {
+    // static checks (different types only) [static->static transition]
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::Target::__static_iterate_generate();
+    }
+  }
+
+  // more efficient handling for shortFunctions():
+  // skip check/generate if (and only if) the call concerns the same class or a base class,
+  // as the caller has already verified the static checksum and leaves it opened due to the
+  // shortFunctions() classification:
+
+  // before static function call: verify the static checksum (order: before "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!skip_enter()) &&
+         call(shortFunctions()) :
+         before() {
+    // static checks (different type and no base class):
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+        (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) {
+      JoinPoint::Target::__static_iterate_check();
+    }
+  }
+
+  // after static function call: (re-)generate the static checksum (order: after "ChecksumAdviceInvoker")
+  advice staticEnter() &&
+         (!skip_leave()) &&
+         call(shortFunctions()) :
+         after() {
+    // static checks (different type and no base class):
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+        (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) {
+      JoinPoint::Target::__static_iterate_generate();
+    }
+  }
+
+};
+
+
+aspect StaticChecksumInheritanceLeave {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual internalChecker() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = derived(criticalClasses()) && !blacklist();
+  pointcut staticFunctions() = "static % ...::%(...)";
+
+  // calls from inside a static function of "inheritanceCriticalClasses()" to somewhere else
+  pointcut staticLeave() = call("% ...::%(...)") &&
+                           within(inheritanceCriticalClasses()) &&
+                           within(staticFunctions()) &&
+                           (!call(shortFunctions())) &&
+                           (!call(internalChecker())) &&
+                           (!within(internalChecker()));
+  
+  // aspect ordering: when we call another class with inheritance,
+  // check _before_ generate to avoid redundant checks (by using the locker)
+  // TODO: this could be further restricted to base/derived relationships!
+  advice staticLeave() && call(inheritanceCriticalClasses()) : order("StaticChecksumInheritance",
+                                                                     "StaticChecksumInheritanceLeave");
+
+  // when we call something completely different, generate _before_ check
+  advice staticLeave() && !call(inheritanceCriticalClasses()) : order("%Checksum%Leave",
+                                                                      "%Checksum%" && !"%Checksum%Leave");
+
+
+  //---------------------------------------------------------------------------->
+  // calls to 'outside' of this class from a static function (order: before calls to the protected classes (below))
+  advice staticLeave() : before() {
+    // static checks (different types only)
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::That::__static_iterate_generate(); // safe the caller
+    }
+  }
+
+  advice staticLeave() : after() {
+    // static checks (different types only)
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::That::__static_iterate_check(); // check the caller
+    }
+  }
+
+};
+
+#endif /* __STATIC_CHECKSUM_INHERITANCE__ */

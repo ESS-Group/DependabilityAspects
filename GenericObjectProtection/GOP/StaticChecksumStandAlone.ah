@@ -1,0 +1,90 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __STATIC_CHECKSUM_STAND_ALONE__
+#define __STATIC_CHECKSUM_STAND_ALONE__
+
+// for efficiency, the stand-alone static checksumming
+// must be invoked independently of __enter() and __leave()
+
+aspect StaticChecksumStandAlone {
+
+  // abstract pointcut definitions
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual skip_enter() = 0;
+  pointcut virtual skip_leave() = 0;
+  pointcut virtual internalChecker() = 0;
+
+  //calls to protected classes (both static and non-static)
+  pointcut staticEnter() = call(standAloneCriticalClasses()) &&
+                           (!call(internalChecker())) &&
+                           (!within(internalChecker()));
+
+  // this aspect should take place after all %Leaves
+  advice staticEnter() : order("%Checksum%Leave",
+                               "StaticChecksumStandAlone");
+
+  advice staticEnter() && (!skip_enter()) : before() {
+    // static checks (different types only)
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::Target::__static_check();
+    }
+  }
+
+  advice staticEnter() && (!skip_leave()) : after() {
+    // static checks (different types only)
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::Target::__static_generate();
+    }
+  }
+
+};
+
+
+aspect StaticChecksumStandAloneLeave {
+
+  // abstract pointcut definitions
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual internalChecker() = 0;
+  
+  //calls to 'outside' of this class
+  pointcut staticLeave() = call("% ...::%(...)") &&
+                           within(standAloneCriticalClasses()) &&
+                           (!call(shortFunctions())) &&
+                           (!call(internalChecker())) &&
+                           (!within(internalChecker()));
+
+  advice staticLeave() : order("%Checksum%Leave", // before calls to the protected classes
+                               "%Checksum%" && !"%Checksum%Leave" );
+
+  advice staticLeave() : before() {
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::That::__static_generate(); // safe the caller
+    }
+  }
+
+  advice staticLeave() : after() {
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      JoinPoint::That::__static_check(); // check the caller
+    }
+  }
+
+};
+
+#endif /* __STATIC_CHECKSUM_STAND_ALONE__ */

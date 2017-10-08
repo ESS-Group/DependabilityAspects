@@ -1,0 +1,22 @@
+#ifndef __MY_OVERFLOW_CHECK_ASPECT_AH__
+#define __MY_OVERFLOW_CHECK_ASPECT_AH__
+
+#include "IntegerOverflowCheck.ah"
+#include <stdio.h>
+#include <stdlib.h>
+
+aspect MyOverflowCheck : public IntegerOverflowCheck {
+  // everywhere:
+  pointcut virtual where() = within("::");
+
+  // error handling:
+  advice on_error() : before() {
+    if(tjp->that() == this) { // dispatcher-aspect pattern
+      printf("%s\n", JoinPoint::signature());
+      exit(1);
+    }
+  }
+};
+
+
+#endif // __MY_OVERFLOW_CHECK_ASPECT_AH__

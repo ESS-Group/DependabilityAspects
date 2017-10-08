@@ -1,0 +1,218 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __CHECKSUM_SLICE_AH__
+#define __CHECKSUM_SLICE_AH__
+
+#include "Actions.h"
+#include "JPTL.h"
+#include "Checksumming.h"
+
+slice class __InheritanceChecksumType {
+private:
+  CoolChecksum::Checksumming<JoinPoint> __chksum;
+
+public:
+  typedef CoolChecksum::Checksumming<JoinPoint> __chksum_t;
+
+  // the virtual check/generate functions, actually called by advice
+  virtual bool __enter() const __attribute__((__flatten__, noinline));
+  virtual void __leave() __attribute__((__flatten__, noinline));
+};
+
+slice void __InheritanceChecksumType::__leave() {
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumType>,
+                     CoolChecksum::Generate>::exec(const_cast<__InheritanceChecksumType*>(this));
+}
+
+slice bool __InheritanceChecksumType::__enter() const {
+  bool result = true;
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumType>,
+                     CoolChecksum::Check>::exec(const_cast<__InheritanceChecksumType*>(this), &result);
+  return result;
+}
+
+
+slice class __InheritanceChecksumTypeGetSet {
+public:
+  bool __enter_get() const __attribute__((__flatten__, noinline));
+
+  // special functions for set advice (these functions don't trigger checking static checksums)
+  virtual bool __enter_set() __attribute__((__flatten__, noinline));
+  virtual void __leave_set() __attribute__((__flatten__, noinline));
+};
+
+slice bool __InheritanceChecksumTypeGetSet::__enter_get() const {
+  //TODO: check dirty upfront?
+  bool result = true;
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeGetSet>,
+                     CoolChecksum::Check>::exec(const_cast<__InheritanceChecksumTypeGetSet*>(this), &result);
+  return result;
+}
+
+slice bool __InheritanceChecksumTypeGetSet::__enter_set() {
+  if(CLASSES_WITH_STATIC_MEMBERS != 0) {
+    bool result = true;
+    JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeGetSet>,
+                       CoolChecksum::Check>::exec(const_cast<__InheritanceChecksumTypeGetSet*>(this), &result);
+    return result;
+  }
+  else {
+    return false; // must not be called in this case
+  }
+}
+
+slice void __InheritanceChecksumTypeGetSet::__leave_set() {
+  if(CLASSES_WITH_STATIC_MEMBERS != 0) {
+    JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeGetSet>,
+                       CoolChecksum::Generate>::exec(const_cast<__InheritanceChecksumTypeGetSet*>(this));
+  }
+}
+
+
+slice class __InheritanceChecksumTypeNonSync { // NON-synchronized
+public:
+  virtual void __leave() const __attribute__((__flatten__, noinline));
+  virtual void __from_non_const_to_const() const __attribute__((__flatten__, noinline));
+};
+
+slice void __InheritanceChecksumTypeNonSync::__leave() const {
+  // GenerateMutable decides per class (based on the existence of mutables), what to do ...
+  // This is only applicable for NON-synchronized classes, as the locker works NOT per class!
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeNonSync>,
+                     CoolChecksum::GenerateMutable>::exec(const_cast<__InheritanceChecksumTypeNonSync*>(this));
+}
+
+slice void __InheritanceChecksumTypeNonSync::__from_non_const_to_const() const {
+  // GenerateNonMutable decides per class (based on the existence of mutables), what to do ...
+  // This is only applicable for NON-synchronized classes, as the locker works NOT per class!
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeNonSync>,
+                     CoolChecksum::GenerateNonMutable>::exec(const_cast<__InheritanceChecksumTypeNonSync*>(this));
+}
+
+
+slice class __InheritanceChecksumTypeSync { // Synchronized for concurrent access
+public:
+  virtual bool __enter() __attribute__((__flatten__, noinline));
+
+  // All decisions based on the existence of mutables are made PER OBJECT (and not per class),
+  // as the locker works per object for synchronized classes!
+  virtual void __leave() const {
+    // generate checksum if and only if there are mutable attributes
+    if(BASE_MEMBERS_MUTABLE != 0) {
+      // call non-const __leave()
+      typedef JoinPoint::That ACTUAL_TYPE;
+      ((ACTUAL_TYPE*)this)->ACTUAL_TYPE::__leave(); // no virtual function call; use fully-qualified variant
+    }
+  }
+
+  virtual void __from_non_const_to_const() const {
+    // generate checksum if and only if there are no mutable attributes
+    if(BASE_MEMBERS_MUTABLE == 0) {
+      // call non-const __leave() ... but must not lead to static checksum actions ...
+      typedef JoinPoint::That ACTUAL_TYPE;
+      ((ACTUAL_TYPE*)this)->ACTUAL_TYPE::__leave(); // no virtual function call; use fully-qualified variant
+    }
+  }
+
+  virtual void __from_const_to_non_const() const {} // explicit join-point for locking
+
+  // functions to mark an object as dirty (being modified)
+  __attribute__((always_inline)) inline void __iterate_dirty() const {
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::Dirty>::exec(const_cast<JoinPoint::That*>(this));
+  }
+};
+
+slice bool __InheritanceChecksumTypeSync::__enter() {
+  //FIXME: call enter() const instead!?!
+  bool result = true;
+  JPTL::BaseIterator<AC::TypeInfo<__InheritanceChecksumTypeSync>,
+                     CoolChecksum::Check>::exec(const_cast<__InheritanceChecksumTypeSync*>(this), &result);
+  return result;
+}
+
+
+slice class __StandAloneChecksumType {
+private:
+  CoolChecksum::Checksumming<JoinPoint> __chksum;
+public:
+  typedef CoolChecksum::Checksumming<JoinPoint> __chksum_t;
+  enum { CHECKSUM_SIZE = CoolChecksum::Checksumming<JoinPoint>::SIZE };
+
+  // wrapper, actually called by advice
+  bool __enter() const __attribute__((__flatten__, noinline));
+  void __leave() __attribute__((__flatten__, noinline));
+
+  __attribute__((always_inline)) inline void __leave() const {
+    // generate checksum if and only if there are mutable attributes
+    if(MEMBERS_MUTABLE != 0) {
+      // call non-const __leave()
+      ((JoinPoint::That*)this)->__leave();
+    }
+  }
+  __attribute__((always_inline)) inline void __from_non_const_to_const() const {
+    // generate checksum if and only if there are no mutable attributes
+    if(MEMBERS_MUTABLE == 0) {
+      // call non-const __leave()
+      ((JoinPoint::That*)this)->__leave();
+    }
+  }
+};
+
+slice bool __StandAloneChecksumType::__enter() const {
+  return __chksum_t::__check(const_cast<__StandAloneChecksumType*>(this));
+}
+
+slice void __StandAloneChecksumType::__leave() {
+  __chksum_t::__generate(const_cast<__StandAloneChecksumType*>(this));
+}
+
+
+slice class __StandAloneChecksumTypeGetSet {
+public:
+  bool __enter_get() const;
+  __attribute__((always_inline)) inline bool __enter_set() { return false; } // must not be called
+  __attribute__((always_inline)) inline void __leave_set() {} // must not be called
+};
+
+slice bool __StandAloneChecksumTypeGetSet::__enter_get() const {
+  if(MEMBERS_MUTABLE == 0) {
+    return false; // must not be called in this case
+  }
+  //TODO: check dirty upfront?
+  return __chksum_t::__check(const_cast<__StandAloneChecksumTypeGetSet*>(this));
+}
+
+
+slice class __StandAloneChecksumTypeSync { // Synchronized for concurrent access
+public:
+  bool __enter() __attribute__((__flatten__, noinline));
+
+  __attribute__((always_inline)) inline void __from_const_to_non_const() const {}; // explicit join-point for locking
+
+  // functions to mark an object as dirty (being modified)
+  __attribute__((always_inline)) inline void __iterate_dirty() const {
+    __chksum.__dirty();
+  }
+};
+
+slice bool __StandAloneChecksumTypeSync::__enter() {
+  return __chksum_t::__check(const_cast<__StandAloneChecksumTypeSync*>(this));
+}
+
+#endif /* __CHECKSUM_SLICE_AH__ */

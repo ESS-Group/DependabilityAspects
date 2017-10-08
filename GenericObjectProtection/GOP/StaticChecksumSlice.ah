@@ -1,0 +1,146 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __STATIC_CHECKSUM_SLICE__
+#define __STATIC_CHECKSUM_SLICE__
+
+#include "Checksumming.h"
+#include "Actions.h"
+#include "JPTL.h"
+
+slice class __StaticChecksumType {
+private:
+  static CoolChecksum::Checksumming<JoinPoint, true> __static_chksum;
+
+public:
+  typedef CoolChecksum::Checksumming<JoinPoint, true> __static_chksum_t;
+
+  enum {
+    // all checksummed static members of this class only
+    STATIC_CHECKSUM_SIZE = __static_chksum_t::SIZE,
+    // number of bases classes (including this class), that have static members to be checksummed
+    CLASSES_WITH_STATIC_MEMBERS = JPTL::BaseIterator<JoinPoint, CoolChecksum::ClassCount>::EXEC::WITH_STATIC_MEMBERS
+  };
+
+  __attribute__((always_inline)) static inline bool __static_check() {
+    if(STATIC_CHECKSUM_SIZE != 0){
+      return __static_check_worker();
+    }
+    else{
+      // do not perform any checks if there are no static attributes
+      return true;
+    }
+  }
+
+  __attribute__((always_inline)) static inline void __static_generate() {
+    if(STATIC_CHECKSUM_SIZE != 0){
+      // do not perform any checks if there are no static attributes
+      return __static_generate_worker();
+    }
+  }
+
+  // do the real work, and thus don't become inline
+  static bool __static_check_worker();
+  static void __static_generate_worker();
+
+
+  // functions to perform base class iteration
+  __attribute__((always_inline)) static inline void __static_iterate_check() {
+    if(CLASSES_WITH_STATIC_MEMBERS > 1) {
+      __static_iterate_check_worker();
+    }
+    else if(CLASSES_WITH_STATIC_MEMBERS == 1) {
+      // don't iterate for a single class, instead call that class directly
+      if(STATIC_CHECKSUM_SIZE != 0) {
+        __static_check(); // this class is the only one with static members
+      }
+      else {
+        // the class with static members is a base class.
+        // the JPTL::BaseIterator will fold to a single call
+        JPTL::BaseIterator<JoinPoint, CoolChecksum::StaticCheck>::exec();
+      }
+    }
+  }
+
+  __attribute__((always_inline)) static inline void __static_iterate_generate() {
+    if(CLASSES_WITH_STATIC_MEMBERS > 1) {
+      __static_iterate_generate_worker();
+    }
+    else if(CLASSES_WITH_STATIC_MEMBERS == 1) {
+      // don't iterate for a single class, instead call that class directly
+      if(STATIC_CHECKSUM_SIZE != 0) {
+        __static_generate(); // this class is the only one with static members
+      }
+      else {
+        // the class with static members is a base class.
+        // the JPTL::BaseIterator will fold to a single call
+        JPTL::BaseIterator<JoinPoint, CoolChecksum::StaticGenerate>::exec();
+      }
+    }
+  }
+
+  // do the real work, and thus don't become inline
+  static void __static_iterate_check_worker() __attribute__((noinline));
+  static void __static_iterate_generate_worker() __attribute__((noinline));
+
+  static bool __static_check_get() __attribute__((noinline)); // unsynchronized check (also used during object construction)
+};
+
+slice __StaticChecksumType::__static_chksum_t __StaticChecksumType::__static_chksum;
+
+slice bool __StaticChecksumType::__static_check_worker() {
+  if(STATIC_CHECKSUM_SIZE != 0) {
+    return __static_chksum.__check(0);
+  }
+  else {
+    return true;
+  }
+}
+
+slice void __StaticChecksumType::__static_generate_worker() {
+  if(STATIC_CHECKSUM_SIZE != 0) {
+    __static_chksum.__generate(0);
+  }
+}
+
+slice void __StaticChecksumType::__static_iterate_check_worker() {
+  if(CLASSES_WITH_STATIC_MEMBERS > 1) {
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::StaticCheck>::exec();
+  }
+}
+
+slice void __StaticChecksumType::__static_iterate_generate_worker() {
+  if(CLASSES_WITH_STATIC_MEMBERS > 1) {
+    JPTL::BaseIterator<JoinPoint, CoolChecksum::StaticGenerate>::exec();
+  }
+}
+
+
+slice bool __StaticChecksumType::__static_check_get() {
+  if(STATIC_CHECKSUM_SIZE != 0) {
+    if(__static_chksum.get_dirty() != 0) {
+      return true; // already in use
+    }
+    return __static_chksum.__check(0);
+  }
+  else {
+    return true;
+  }
+}
+
+#endif /* __STATIC_CHECKSUM_SLICE__ */

@@ -1,0 +1,45 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef FUNCTION_POINTER_CHECK_AH_
+#define FUNCTION_POINTER_CHECK_AH_
+
+aspect FunctionPointerCheck {
+protected:
+  pointcut virtual where() = 0; // must be defined by derived aspects
+  pointcut on_error() = execution("void FunctionPointerCheck::error()");
+  pointcut lower_limit() = execution("void (*FunctionPointerCheck::lower())()");
+  pointcut upper_limit() = execution("void (*FunctionPointerCheck::upper())()");
+
+private:
+  inline void error() {} // explicit join point, exposed via on_error()
+  inline void (*lower())() { return 0; } // explicit join point, exposed via lower_limit()
+  inline void (*upper())() { return 0; } // explicit join point, exposed via upper_limit()
+
+  // capture the dereference operator of any function pointer
+  advice where() && builtin("% operator *( % (*)(...) )") : before() {
+    // use the join-point API to get the function pointer
+    void (*func_ptr)() = (void (*)()) *tjp->arg<0>();
+
+    if (func_ptr < lower() || func_ptr > upper())
+      error(); // range check failed
+  }
+};
+
+#endif /* FUNCTION_POINTER_CHECK_AH_ */
+

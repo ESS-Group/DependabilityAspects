@@ -1,0 +1,96 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __GOP_COMMON_AH__
+#define __GOP_COMMON_AH__
+
+#include "ChecksumIntroducer.ah"
+#include "StaticChecksumStandAlone.ah"
+#include "ChecksumAdviceInvoker.ah"
+#include "StaticChecksumInheritance.ah"
+#include "LockAdviceInvoker.ah"
+#include "StaticChecksumConstruction.ah"
+#include "ChecksumGetSetAdviceInvoker.ah"
+
+
+aspect GOP_Common : public ChecksumIntroducer, // before: LockAdviceInvoker
+                    public StaticChecksumStandAloneLeave, // before: ChecksumAdviceInvoker, StaticChecksum%
+                    public ChecksumAdviceInvoker, // before: StaticChecksumInheritanceLeave
+                    public StaticChecksumInheritance, // before: StaticChecksumInheritanceLeave
+                    public StaticChecksumInheritanceLeave, // before: StaticChecksumStandAlone
+                    public ChecksumAdviceInvokerLeave, // before: StaticChecksumStandAlone
+                    public StaticChecksumStandAlone,
+                    public LockAdviceInvoker, // after: StaticChecksumInheritance
+                    public StaticChecksumConstruction,
+                    public ChecksumGetSetAdviceInvoker {
+
+  // abstract pointcut definitions: to be provided by derived aspects
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual synchronizedClasses() = 0;
+  pointcut virtual shortFunctions() = 0;
+  pointcut virtual skip_enter() = 0;
+  pointcut virtual skip_leave() = 0;
+  pointcut virtual entryPoint() = 0;
+
+protected:
+  // uncorrectable-error handling: can be advised by derived aspects
+  pointcut on_error(bool corrected) =
+             execution("bool ...::__enter()" || "bool ...::__enter_set()" || "bool ...::__enter_get()")
+             && within(criticalClasses() || standAloneCriticalClasses())
+             && result(corrected);
+
+  pointcut on_error_static(bool corrected) =
+             execution("static bool ...::__static_check_worker()" || "static bool ...::__static_check_get()")
+             && within(criticalClasses() || standAloneCriticalClasses())
+             && result(corrected);
+
+  pointcut on_error_synchronized() = execution("void ...::synchronizerLockError()");
+
+  // notification when a correctable error gets corrected
+  pointcut on_correction() = execution("void CoolChecksum::errorCorrected()");
+
+private:
+  // internal join points that must not be advised:
+  pointcut internalChecker() = "% ...::__check(...)" || "% ...::__generate(...)" ||
+                               "% ...::__static_check(...)" || "% ...::__static_generate(...)" ||
+                               "% ...::__const_check(...)" ||
+                               "% ...::__dirty(...)" || "% ...::__iterate_dirty(...)" || "% ...::__static_dirty(...)" ||
+                               "% ...::__static_check_worker(...)" || "% ...::__static_generate_worker(...)" ||
+                               "% ...::__static_iterate_check(...)" || "% ...::__static_iterate_generate(...)" ||
+                               "% ...::__static_iterate_check_worker(...)" || "% ...::__static_iterate_generate_worker(...)" ||
+                               "% ...::__enter(...)" || "% ...::__leave(...)" ||
+                               "% ...::__lock(...)" || "% ...::__unlock(...)" ||
+                               "% ...::__iterate_lock(...)" || "% ...::__iterate_unlock(...)" ||
+                               "% ...::__is_locked(...)" || "% ...::__iterate_is_locked(...)" ||
+                               "% ...::__static_lock(...)" || "% ...::__static_unlock(...)" ||
+                               "% ...::__from_non_const_to_const(...)" || "% ...::__from_const_to_non_const(...)" ||
+                               "% ...::__static_check_get()" ||
+                               "% ...::__enter_set()" || "% ...::__enter_get()" || "% ...::__leave_set()" ||
+                               "% CoolChecksum::Checksumming<...>::%(...)" ||
+                               "% CoolChecksum::ChksumLocker<...>::%(...)" ||
+                               "% StaticChecksumConstruction::__static_checksum_initialized(...)" ||
+                               "% ...::__explicit_check_vptr(...)" || "% ...::__init_vptr(...)" || "% ...::__check_vptr(...)" ||
+                               "% VptrProtection::...::%(...)" ||
+                               "% ...::checksum(%, %)" || "% ...::calc_sum()" || "% ...::check_stack_ptr_valid()" ||
+                               "% JPTL::...::%(...)";
+};
+
+#endif // __GOP_COMMON_AH__
+

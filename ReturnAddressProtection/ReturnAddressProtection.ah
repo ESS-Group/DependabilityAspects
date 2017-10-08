@@ -1,0 +1,188 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __RETADDR_GUARD_AH__
+#define __RETADDR_GUARD_AH__
+
+#ifndef likely
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+#endif /* likely */
+
+aspect ReturnAddressProtection {
+protected:
+  // must be specified by derived aspects
+  pointcut virtual where() = 0;
+  pointcut virtual correction() = 0;
+
+  // can be advised by derived aspects
+  pointcut on_error() = execution("void ReturnAddressProtection::error()");
+
+private:
+  __attribute__((always_inline)) static inline void error() {
+    // explicit join point
+  }
+
+  // XOR-encoded-storage of a pointer
+  template<unsigned long HASHCODE>
+  union EncodedPointer {
+  private:
+    unsigned long encoded;
+    const void* pointer;
+
+    __attribute__((always_inline)) inline void encode() {
+      encoded ^= HASHCODE;
+    }
+
+    __attribute__((always_inline)) inline void set(const void* ptr) {
+      pointer = ptr;
+      encode();
+    }
+
+  public:
+    // constructors
+    __attribute__((always_inline)) inline EncodedPointer() {}
+    __attribute__((always_inline)) inline EncodedPointer(const void* ptr) : encoded(0) { set(ptr); }
+
+    // conversion operators
+    __attribute__((always_inline)) inline operator const void*() {
+      return EncodedPointer(pointer).pointer; // decoded
+    }
+    __attribute__((always_inline)) inline operator const void*() volatile {
+      return EncodedPointer(pointer).pointer; // decoded
+    }
+    __attribute__((always_inline)) inline operator unsigned long() {
+      return EncodedPointer(pointer).encoded; // decoded
+    }
+
+    // assignment operators
+    __attribute__((always_inline)) inline void operator=(const void* ptr) { set(ptr); }
+    __attribute__((always_inline)) inline void operator=(const EncodedPointer& ep) volatile {
+      this->pointer = ep.pointer;
+    }
+
+    // comparison operators
+    __attribute__((always_inline)) inline bool operator==(const void* ptr) { return (const void*)(*this) == ptr; }
+    __attribute__((always_inline)) inline bool operator==(const EncodedPointer& ep) { return pointer == ep.pointer; }
+    __attribute__((always_inline)) inline bool operator!=(const EncodedPointer& ep) { return pointer != ep.pointer; }
+  };
+
+  // CAVE: not portable, replace with architecture-specific
+  //       inline assembly if necessary; this version should work
+  //       at least on i386 and amd64
+  template<int HASHCODE>
+  __attribute__((always_inline)) inline static EncodedPointer<HASHCODE> get_return_address() {
+    return EncodedPointer<HASHCODE> ( (* (((void * volatile*)__builtin_frame_address(0))+1) ) );
+  }
+  template<typename T>
+  __attribute__((always_inline)) inline static void set_return_address(T ret_addr) {
+     *(((const void * volatile*)__builtin_frame_address(0))+1) = ret_addr;
+  }
+
+  template<int HASHCODE>
+  __attribute__((always_inline)) inline static EncodedPointer<HASHCODE> get_frame_address() {
+    return EncodedPointer<HASHCODE> ( (* (((void * volatile*)__builtin_frame_address(0))) ) );
+  }
+  template<typename T>
+  __attribute__((always_inline)) inline static void set_frame_address(T frame_addr) {
+     *((const void * volatile*)__builtin_frame_address(0)) = frame_addr;
+  }
+
+  // constructor/destructor-pattern objects
+  template<unsigned int JPID>
+  class RedundantRetAddr {
+  private:
+    volatile EncodedPointer<0> ret_addr;
+    volatile EncodedPointer<0> prev_frame_ptr;
+    unsigned long checksum;
+
+  public:
+    __attribute__((always_inline)) inline RedundantRetAddr()
+      {
+        EncodedPointer<0> ret_addr(get_return_address<0>());
+        EncodedPointer<0> prev_frame_ptr(get_frame_address<0>());
+
+        this->ret_addr = ret_addr;
+        this->prev_frame_ptr = prev_frame_ptr;
+
+        checksum = ret_addr + (prev_frame_ptr + JPID + 2);
+      }
+
+    __attribute__((always_inline)) inline ~RedundantRetAddr() {
+      const unsigned long curr = get_return_address<0>() + (get_frame_address<0>() + JPID + 2);
+      if(unlikely(curr != checksum)) {
+        // access volatile redundancy once
+        EncodedPointer<0> ret_addr(this->ret_addr);
+        EncodedPointer<0> prev_frame_ptr(this->prev_frame_ptr);
+
+        // compute checksum for the redundancy
+        const unsigned long redundancy = ret_addr + (prev_frame_ptr + JPID + 2);
+
+        if ((redundancy == curr) && (ret_addr != prev_frame_ptr)) {
+          // ret_addr and prev_frame_ptr must not be identical
+          // checksum is faulty ... no need for repair
+          return;
+        }
+        else if (redundancy == checksum) {
+          set_frame_address(prev_frame_ptr); // repair saved frame pointer
+          set_return_address(ret_addr); // repair return address
+          return;
+        }
+        ReturnAddressProtection::error();
+      }
+    }
+  };
+
+  template<unsigned int JPID>
+  class ChecksumRetAddr {
+    private:
+    unsigned long checksum;
+
+    public:
+    __attribute__((always_inline)) inline ChecksumRetAddr() :
+      checksum( get_return_address<0>() + (get_frame_address<0>() + JPID + 2) ) {}
+
+    __attribute__((always_inline)) inline ~ChecksumRetAddr() {
+      const unsigned long curr = get_return_address<0>() + (get_frame_address<0>() + JPID + 2);
+      if(unlikely(curr != checksum)) {
+        ReturnAddressProtection::error();
+      }
+    }
+  };
+
+  // highest precedence:
+  advice execution(where() && "% ...::%(...)") : order(derived("ReturnAddressProtection"), !derived("ReturnAddressProtection"));
+
+  // error correction:
+  advice (execution(where() && "% ...::%(...)" && correction()) && !on_error()) ||
+          construction(where() && !"% ...::%(...)" && correction() && !"ReturnAddressProtection") ||
+          destruction(where() && !"% ...::%(...)" && correction() && !"ReturnAddressProtection") : around() {
+    RedundantRetAddr<JoinPoint::JPID> rra; // check on destruction
+    tjp->proceed();
+  }
+
+  // error detection, only:
+  advice (execution(where() && "% ...::%(...)" && !correction()) && !on_error()) ||
+          construction(where() && !"% ...::%(...)" && !correction() && !"ReturnAddressProtection") ||
+          destruction(where() && !"% ...::%(...)" && !correction() && !"ReturnAddressProtection") : around() {
+    ChecksumRetAddr<JoinPoint::JPID> chksum; // check on destruction
+    tjp->proceed();
+  }
+};
+
+#endif // __RETADDR_GUARD_AH__

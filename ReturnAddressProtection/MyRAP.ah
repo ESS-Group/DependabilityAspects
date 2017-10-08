@@ -1,0 +1,23 @@
+#ifndef __MY_RETADDR_GUARD_AH__
+#define __MY_RETADDR_GUARD_AH__
+
+#include "ReturnAddressProtection.ah"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+aspect MyRetAddrGuard : public ReturnAddressProtection {
+  // functions/classes to protect:
+  pointcut where() = "% ...::%(...)";
+
+  // also error correction:
+  pointcut correction() = where();
+
+  // error handling:
+  advice on_error() : before() {
+    printf("Stack memory corrupt: exiting program ...\n");
+    exit(1);
+  }
+};
+
+#endif //__MY_RETADDR_GUARD_AH__

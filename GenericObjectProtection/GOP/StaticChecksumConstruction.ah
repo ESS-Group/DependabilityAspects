@@ -1,0 +1,112 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __STATIC_CHECKSUM_CONSTRUCTION__
+#define __STATIC_CHECKSUM_CONSTRUCTION__
+
+#include "Actions.h"
+
+
+aspect StaticChecksumConstruction {
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual entryPoint() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = derived(criticalClasses()) && !blacklist();
+
+  // static method to determine whether global/static constructors had been executed
+  public: __attribute__((always_inline)) inline static const bool __static_checksum_initialized(const bool entry_point_reached=false) {
+    static unsigned char _initialized = 0;
+    if(entry_point_reached == true) {
+      _initialized = 0xAA; // fault-tolerant bool
+    }
+    return (_initialized != 0);
+  }
+
+  private:
+  // remember that 'entryPoint()' has been reached: all global/static checksums are initialized now.
+  advice execution(entryPoint()) : before() {
+    __static_checksum_initialized(true);
+  }
+  
+  // check the static members before constructing objects (only for non-empty ctors)
+  advice construction(inheritanceCriticalClasses() || standAloneCriticalClasses()) : before() {
+    //  * in fact, there is no need to __iterate__ over the base classes for checking,
+    //    because the base classes are visited in order, so that their checksum has been
+    //    __just__ freshly generated.
+    //  * but, for locking correctness, "check" and "generate" have to be invoked equally often.
+    //  * This is optimized by explicitly locking the base classes
+    //    and only checking the actual class.
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      if(__static_checksum_initialized() == true) {
+        CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::STATIC_CHECKSUM_SIZE>::__static_check();
+      }
+      // else: locker is invoked by LockAdviceInvoker
+    }
+  }
+
+  // check the static members before constructing objects (always do so for classes w/ inheritance)
+  advice construction(inheritanceCriticalClasses()) : before() {
+    //  NOTE: even if there is *NO* user-defined constructor, we need to check the static checksum,
+    //        since a (potentially existing) derived class will not verify its bases' checksums.
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 0) { // has *NO* user-defined constructor
+      if(__static_checksum_initialized() == true) {
+        // unsynchronized check (does not trigger LockAdviceInvoker)
+        CoolChecksum::__ConditionalCall<JoinPoint::That, JoinPoint::That::STATIC_CHECKSUM_SIZE>::__static_check_get();
+      }
+    }
+  }
+
+  // generate new checksum for static members after object construction (only for non-empty ctors; only for standAlone)
+  advice construction(standAloneCriticalClasses()) : after() {
+    if(JoinPoint::That::USER_DEFINED_CONSTRUCTOR == 1) { // has user-defined constructor
+      JoinPoint::That::__static_generate();
+    }
+  }
+
+
+  // -- object destruction --
+
+  // generate new checksum for static members after object destruction
+  advice destruction(inheritanceCriticalClasses()) : after() {
+    if(JoinPoint::That::USER_DEFINED_DESTRUCTOR == 1) { // has user-defined destructor
+      JoinPoint::That::__static_iterate_generate();
+    }
+  }
+
+  // check the static checksum before object destruction (only for standAlone -- not tied to '__enter')
+  advice destruction(standAloneCriticalClasses()) : before() {
+    if(JoinPoint::That::USER_DEFINED_DESTRUCTOR == 1) { // has user-defined destructor
+      JoinPoint::That::__static_check();
+    }
+  }
+
+  // generate new checksum for static members after object destruction
+  advice destruction(standAloneCriticalClasses()) : after() {
+    if(JoinPoint::That::USER_DEFINED_DESTRUCTOR == 1) { // has user-defined destructor
+      JoinPoint::That::__static_generate();
+    }
+  }
+
+};
+
+#endif /* __STATIC_CHECKSUM_CONSTRUCTION__ */

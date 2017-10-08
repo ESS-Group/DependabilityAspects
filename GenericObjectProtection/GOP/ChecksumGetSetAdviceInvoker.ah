@@ -1,0 +1,193 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __CHECKSUM_GET_SET_ADVICE_AH__
+#define __CHECKSUM_GET_SET_ADVICE_AH__
+
+//#include "../vptr_guard/VPtr_Guard_Slice.ah"
+
+#include "GOP_GlobalConfig.h"
+#include "ObjectSize.h"
+#include "Actions.h"
+//#include "JPTL.h"
+
+aspect ChecksumGetSetAdviceInvoker {
+
+#if GOP_USE_GET_SET_ADVICE
+
+  // abstract pointcut definitions
+  pointcut virtual criticalClasses() = 0;
+  pointcut virtual standAloneCriticalClasses() = 0;
+  pointcut virtual blacklist() = 0;
+  pointcut virtual synchronizedClasses() = 0;
+  pointcut virtual internalChecker() = 0;
+
+  // helper pointcuts
+  pointcut inheritanceCriticalClasses() = derived(criticalClasses()) && !blacklist();
+  pointcut staticAccess() = get("static % ...::%") || set("static % ...::%");
+
+  // ------------------------------------------------------------------------------------------------------
+  // static access to class members:
+  // ------------------------------------------------------------------------------------------------------
+
+  // static member GET access (from outside of the particular class)
+  advice ( get(inheritanceCriticalClasses()) ||
+          (get(standAloneCriticalClasses()) && get(synchronizedClasses())) ) &&
+         staticAccess() &&
+         !within(internalChecker()) : before() {
+    // static checks (different types and no base class):
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+        (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) {
+      if(JoinPoint::Target::STATIC_CHECKSUM_SIZE != 0) {
+        // use un-synchronized variant
+        JoinPoint::Target::__static_check_get();
+      }
+    }
+  }
+  advice get(standAloneCriticalClasses()) &&
+         !get(synchronizedClasses()) &&
+         staticAccess() &&
+         !within(internalChecker()) : before() {
+    // static checks (different types):
+    if(CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) {
+      if(JoinPoint::Target::STATIC_CHECKSUM_SIZE != 0) {
+        // in this case, already no locking (synchronization) is involved
+        JoinPoint::Target::__static_check();
+      }
+    }
+  }
+
+  // static member SET access (from outside of the particular class)
+  advice set(inheritanceCriticalClasses() || standAloneCriticalClasses()) &&
+         staticAccess() &&
+         !within(internalChecker()) : before() {
+    // static checks (different type and no base class):
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+        (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) {
+      JoinPoint::Target::__static_check();
+    }
+  }
+
+  advice set(inheritanceCriticalClasses() || standAloneCriticalClasses()) &&
+         staticAccess() &&
+         !within(internalChecker()) : after() {
+    // static checks (different type and no base class):
+    if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+        (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) {
+      JoinPoint::Target::__static_generate();
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------------------
+  // non-static access to classes with inheritance:
+  // ------------------------------------------------------------------------------------------------------
+
+  // non-static member GET access (from outside of the particular class)
+  advice get(inheritanceCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : before() {
+    // static checks (different type and no base class, or different objects)
+    if( ( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+          (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) ||
+         (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      // for classes with inheritance, we shouldn't call  "__enter() const" here,
+      // as it would also check the static data members.
+      static_cast<const JoinPoint::Target*>(tjp->target())->__enter_get();
+    }
+  }
+
+  // non-static member SET access (from outside of the particular class)
+  advice set(inheritanceCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : before() {
+    // static checks (different type and no base class, or different objects)
+    if( ( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+          (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) ||
+         (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      if(JoinPoint::Target::CLASSES_WITH_STATIC_MEMBERS == 0) {
+        tjp->target()->__enter(); // re-use __enter if no static members are present
+      }
+      else {
+        tjp->target()->__enter_set();
+      }
+    }
+  }
+
+  advice set(inheritanceCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : after() {
+    // static checks (different type and no base class, or different objects)
+    if( ( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) &&
+          (CoolChecksum::is_base_and_derived<JoinPoint::Target, JoinPoint::That>::RET == 0) ) ||
+         (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+      //JPTL::BaseIterator<AC::TypeInfo<JoinPoint::Target>, VptrProtection::CheckVptr>::exec(tjp->target());
+      if(JoinPoint::Target::CLASSES_WITH_STATIC_MEMBERS == 0) {
+        tjp->target()->__leave(); // re-use __leave if no static members are present
+      }
+      else {
+        tjp->target()->__leave_set();
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------------------
+  // non-static access to stand-alone classes (without inheritance):
+  // ------------------------------------------------------------------------------------------------------
+
+  advice get(standAloneCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : before() {
+    if(JoinPoint::Target::__chksum_t::SIZE != 0) {
+      // static checks (different type and no base class, or different objects)
+      if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+          (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+        if(JoinPoint::Target::MEMBERS_MUTABLE == 0) {
+          static_cast<const JoinPoint::Target*>(tjp->target())->__enter();
+        }
+        else {
+          static_cast<const JoinPoint::Target*>(tjp->target())->__enter_get();
+        }
+      }
+    }
+  }
+
+  advice set(standAloneCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : before() {
+    if(JoinPoint::Target::__chksum_t::SIZE != 0) {
+      // static checks (different type and no base class, or different objects)
+      if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+          (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+        tjp->target()->__enter();
+      }
+    }
+  }
+
+  advice set(standAloneCriticalClasses()) && !staticAccess() &&
+         !within(internalChecker()) : after() {
+    if(JoinPoint::Target::__chksum_t::SIZE != 0) {
+      // static checks (different type and no base class, or different objects)
+      if( (CoolChecksum::TypeTest<JoinPoint::That, JoinPoint::Target>::EQUAL == 0) ||
+          (CoolChecksum::EqualPointers(tjp->that(), tjp->target()) == false) ) {
+        tjp->target()->__leave();
+      }
+    }
+  }
+
+#endif // GOP_USE_GET_SET_ADVICE
+};
+
+
+
+#endif // __CHECKSUM_GET_SET_ADVICE_AH__

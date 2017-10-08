@@ -1,0 +1,147 @@
+/* 
+ * This file is part of the library of dependability aspects.
+ * See: http://dx.doi.org/10.17877/DE290R-17995
+ * Copyright (c) 2017 Christoph Borchert.
+ * 
+ * This program is free software: you can redistribute it and/or modify  
+ * it under the terms of the GNU General Public License as published by  
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but 
+ * WITHOUT ANY WARRANTY; without even the implied warranty of 
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License 
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __INTEGER_OVERFLOW_CHECK_ASPECT_AH__
+#define __INTEGER_OVERFLOW_CHECK_ASPECT_AH__
+
+aspect IntegerOverflowCheck {
+protected:
+  // must be specified by derived aspects
+  pointcut virtual where() = 0;
+
+  // can be advised by derived aspects
+  pointcut on_error() = execution("void IntegerOverflowCheck::error()");
+
+private:
+  // explicit join point, exposed via on_error()
+  __attribute__((always_inline)) inline void error() {}
+
+  pointcut floats() = result("float" || "float&" || "double" || "double&");
+  pointcut pointer() = result("%*" || "%*&");
+  pointcut integer() = where() && !floats() && !pointer();
+
+  // type trait converting pointer type into base type, e.g., int* -> int
+  template<typename T>
+  struct RemovePointer {
+    typedef T Type;
+  };
+  template<typename T>
+  struct RemovePointer<const T> { // remove const
+    typedef typename RemovePointer<T>::Type Type;
+  };
+  template<typename T>
+  struct RemovePointer<T*> { // remove pointer
+    typedef typename RemovePointer<T>::Type Type;
+  };
+
+  // ordering: this aspect must execute after all other aspects
+  advice builtin("% operator %(...)") && integer() : order(!"IntegerOverflowCheck", "IntegerOverflowCheck");
+
+  // ADDITION
+  advice builtin("% operator+(%, %)") && integer() : around() {
+    // int operator +(int,int)
+    const bool ovf = __builtin_add_overflow(*tjp->arg<0>(), *tjp->arg<1>(), tjp->result());
+    if(ovf)
+      error();
+  }
+
+  advice builtin("% operator+=(%, %)") && integer() : around() {
+    // int &operator +=(int &,int)
+    typedef typename RemovePointer<JoinPoint::Result>::Type Result;
+    Result result;
+    const bool ovf = __builtin_add_overflow(*tjp->arg<0>(), static_cast<Result>(*tjp->arg<1>()), &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    **tjp->result() = result; // optimization: overwrite unused computation
+  }
+
+  advice builtin("% operator++(%)") && integer() : around() { // prefix (++i)
+    // int &operator ++(int &)
+    typename RemovePointer<JoinPoint::Result>::Type result;
+    const bool ovf = __builtin_add_overflow(*tjp->arg<0>(), 1, &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    **tjp->result() = result; // optimization: overwrite unused computation
+  }
+
+  advice builtin("% operator++(%, int)") && integer() : around() { // postfix (i++)
+    // int operator ++(int &,int)
+    typename RemovePointer<JoinPoint::Result>::Type result;
+    const bool ovf = __builtin_add_overflow(*tjp->arg<0>(), 1, &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    *tjp->arg<0>() = result; // optimization: overwrite unused computation
+  }
+
+  // SUBTRACTION
+  advice builtin("% operator-(%, %)") && !builtin("% operator -(%*, %*)") && integer() : around() {
+    const bool ovf = __builtin_sub_overflow(*tjp->arg<0>(), *tjp->arg<1>(), tjp->result());
+    if(ovf)
+      error();
+  }
+
+  advice builtin("% operator-=(%, %)") && integer() : around() {
+    typedef typename RemovePointer<JoinPoint::Result>::Type Result;
+    Result result;
+    const bool ovf = __builtin_sub_overflow(*tjp->arg<0>(), static_cast<Result>(*tjp->arg<1>()), &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set
+    **tjp->result() = result; // optimization: overwrite unused computation
+  }
+
+  advice builtin("% operator--(%)") && integer() : around() { // prefix (--i)
+    typename RemovePointer<JoinPoint::Result>::Type result;
+    const bool ovf = __builtin_sub_overflow(*tjp->arg<0>(), 1, &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    **tjp->result() = result; // optimization: overwrite unused computation
+  }
+
+  advice builtin("% operator--(%, int)") && integer() : around() { // postfix (i--)
+    typename RemovePointer<JoinPoint::Result>::Type result;
+    const bool ovf = __builtin_sub_overflow(*tjp->arg<0>(), 1, &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    *tjp->arg<0>() = result; // optimization: overwrite unused computation
+  }
+
+  // MULTIPLICATION
+  advice builtin("% operator*(%, %)") && integer() : around() {
+    const bool ovf = __builtin_mul_overflow(*tjp->arg<0>(), *tjp->arg<1>(), tjp->result());
+    if(ovf)
+      error();
+  }
+
+  advice builtin("% operator*=(%, %)") && integer() : around() {
+    typedef typename RemovePointer<JoinPoint::Result>::Type Result;
+    Result result;
+    const bool ovf = __builtin_mul_overflow(*tjp->arg<0>(), static_cast<Result>(*tjp->arg<1>()), &result);
+    if(ovf)
+      error();
+    tjp->proceed(); // activate subsequent get/set joinpoints
+    **tjp->result() = result; // optimization: overwrite unused computation
+  }
+};
+
+#endif // __INTEGER_OVERFLOW_CHECK_ASPECT_AH__

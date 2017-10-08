@@ -1,0 +1,17 @@
+#ifndef __MY_TYPECHECK__AH__
+#define __MY_TYPECHECK__AH__
+
+#include "TypeCheck.ah"
+
+#include <typeinfo> // for exception: std::bad_typeid
+
+aspect MyTypeCheck : public TypeCheck {
+  // capture access to any type
+  pointcut virtual where() = "...::%";
+
+  // error handling
+  advice on_error() : around() { throw std::bad_typeid(); }
+};
+
+#endif /* __MY_TYPECHECK__AH__ */
+
